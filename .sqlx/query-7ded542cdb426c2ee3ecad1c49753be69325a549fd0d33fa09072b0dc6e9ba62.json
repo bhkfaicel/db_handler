@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM keys WHERE mac = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7ded542cdb426c2ee3ecad1c49753be69325a549fd0d33fa09072b0dc6e9ba62"
+}

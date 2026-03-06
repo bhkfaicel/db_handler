@@ -1,0 +1,67 @@
+services:
+  # InfluxDB service for tests
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: db_handler_influxdb_test
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=admin123456
+      - DOCKER_INFLUXDB_INIT_ORG=test-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=test_bucket
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=test-token-1234567890123456789012345678901234567890123456789012345678901234
+    volumes:
+      - influxdb_test_data:/var/lib/influxdb2
+    healthcheck:
+      # Check that port 8086 is responding
+      test: ["CMD-SHELL", "nc -z localhost 8086 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - test-network
+
+  # Service to run tests
+  test-runner:
+    build:
+      context: ..
+      dockerfile: db_handler/Dockerfile.test
+      args:
+        CARGO_REGISTRIES_FORGEJO_TOKEN: ${CARGO_REGISTRIES_FORGEJO_TOKEN}
+    container_name: db_handler_test_runner
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    environment:
+      - CONFIG_FILE=/app/db_handler/config.test.json
+      - TIMESERIES_DB_URL=http://influxdb:8086
+      - TIMESERIES_DB_ORG=test-org
+      - TIMESERIES_DB_TOKEN=test-token-1234567890123456789012345678901234567890123456789012345678901234
+      - RUST_BACKTRACE=1
+      - SQLX_OFFLINE=true
+    volumes:
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/db_handler/target
+    working_dir: /app/db_handler
+    networks:
+      - test-network
+    command: >
+      sh -c "
+        echo 'Waiting for InfluxDB to be ready...' &&
+        sleep 5 &&
+        echo 'Running tests...' &&
+        cargo nextest run --features sensors,utoipaDoc,users --no-fail-fast &&
+        cargo test --doc --features sensors,utoipaDoc,users
+      "
+
+volumes:
+  influxdb_test_data:
+  cargo-cache:
+  target-cache:
+
+networks:
+  test-network:
+    driver: bridge

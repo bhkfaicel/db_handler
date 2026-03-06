@@ -1,0 +1,70 @@
+name: Publish crate to Forgejo registry
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  publish:
+    runs-on: docker
+    env:
+      # Provided as a secret in the Forgejo repository settings.
+      # Must be a personal access token with write:package permission.
+      CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.RUNNER_TOKEN }}"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Required for private repos (or when the runner does not inject a token).
+          # Use a PAT with "read" repository access, or the same token as FORGEJO_TOKEN if it has repo scope.
+          token: ${{ secrets.RUNNER_TOKEN }}
+
+      - name: Install docker-compose
+        run: |
+          if command -v docker-compose >/dev/null 2>&1; then
+            docker-compose version
+          else
+            curl -L "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+            docker-compose version
+          fi
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Show Rust and Cargo versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Run tests (Docker)
+        run: ./scripts/test-docker.sh
+
+      - name: Create and push tag from Cargo.toml version
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          # Extract the version from Cargo.toml (first line: version = "x.y.z")
+          VERSION=$(sed -n 's/^version\s*=\s*"\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          TAG_NAME="v${VERSION}"
+
+          echo "Creating tag $TAG_NAME from Cargo.toml version $VERSION"
+
+          git config user.name "CI"
+          git config user.email "faycelbhk@gmail.com"
+
+          # Create the local tag if it does not already exist
+          git tag "$TAG_NAME" 2>/dev/null || echo "Tag $TAG_NAME already exists locally, skipping creation"
+
+          # Update the remote URL with the token so we can push the tag
+          git remote set-url origin "https://${REPO_ACCESS_TOKEN}@code.bhk-itsolutions.com/homeiot/db_handler.git"
+          git push origin "$TAG_NAME"
+
+      - name: Publish crate to Forgejo registry
+        run: cargo publish --registry forgejo
+

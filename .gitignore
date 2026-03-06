@@ -1,0 +1,35 @@
+target/
+
+# Environment and secrets (do not commit)
+.env
+.env.*
+!.env.example
+env.local
+.test.env
+config.json
+config.local.json
+
+# Local data and DB files
+data/
+*.db
+info
+
+# editor / IDE
+.cursor/
+.vscode/*
+!.vscode/*.md
+!.vscode/*.svd
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# Internal docs (preparation, improvements tracking)
+PREPARATION_PUBLICATION.md
+AMELIORATIONS.md
+REVUE_ARCHITECTURE.md
+TRANSACTIONS_LOGGING.md
+
+# OS files
+.DS_Store
+Thumbs.db
+tests1/*

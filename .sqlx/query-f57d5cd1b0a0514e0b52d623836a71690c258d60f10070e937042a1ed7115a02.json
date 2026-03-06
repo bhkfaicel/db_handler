@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO nonces (value, mac) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f57d5cd1b0a0514e0b52d623836a71690c258d60f10070e937042a1ed7115a02"
+}

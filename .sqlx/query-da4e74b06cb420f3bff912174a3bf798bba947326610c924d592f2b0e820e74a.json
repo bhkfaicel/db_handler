@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO historical_keys (value, expire_at) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "da4e74b06cb420f3bff912174a3bf798bba947326610c924d592f2b0e820e74a"
+}

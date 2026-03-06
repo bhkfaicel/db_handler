@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT s.id, s.mac, s.status,\n         ocs.is_open as \"is_open: Option<i32>\", \n        ocs.updated_at as \"updated_at: Option<NaiveDateTime>\"\n        FROM sensors s\n        LEFT JOIN open_close_sensors ocs ON s.id = ocs.sensor_id\n        WHERE s.id = ? AND s.sensor_type = 'ContactSensor'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "mac",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_open: Option<i32>",
+        "ordinal": 3,
+        "type_info": "Bool"
+      },
+      {
+        "name": "updated_at: Option<NaiveDateTime>",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "42cc1a78e42eeeefc1e18446658d75343bab2ce22cfe4da49b3e2d64016a198c"
+}

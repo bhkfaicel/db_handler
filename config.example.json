@@ -1,0 +1,6 @@
+{
+  "primary_db_url": "sqlite:data/home_iot.db",
+  "history_db_url": "http://localhost:8086",
+  "history_db_org": "your-org",
+  "history_db_token": "your-influxdb-token"
+}

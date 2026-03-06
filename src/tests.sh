@@ -1,0 +1,2 @@
+# Run tests with test config (override with CONFIG_FILE if needed).
+CONFIG_FILE="${CONFIG_FILE:-config.test.json}" cargo nextest run --features sensors,utoipaDoc,users --no-fail-fast && cargo test --doc --features sensors,utoipaDoc,users

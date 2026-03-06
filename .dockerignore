@@ -1,0 +1,13 @@
+target/
+.git/
+.gitignore
+*.db
+*.db-shm
+*.db-wal
+data/
+.env
+.env.local
+*.log
+.DS_Store
+.vscode/
+.idea/

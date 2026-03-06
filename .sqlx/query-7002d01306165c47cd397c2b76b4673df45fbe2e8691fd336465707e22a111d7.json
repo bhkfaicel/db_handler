@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO keys (value, expire_at,mac) VALUES (?, ?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7002d01306165c47cd397c2b76b4673df45fbe2e8691fd336465707e22a111d7"
+}

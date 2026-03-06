@@ -1,0 +1,66 @@
+name: Create Forgejo release on tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release_on_tag:
+    runs-on: docker
+    env:
+      # Provided as a secret in the Forgejo repository settings.
+      # Must be a personal access token with write:package permission (for publish on main),
+      # read-only is enough here if only Docker tests need Forgejo.
+      CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.RUNNER_TOKEN }}"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # PAT with read access to the repository
+          token: ${{ secrets.RUNNER_TOKEN }}
+
+      - name: Install docker-compose
+        run: |
+          if command -v docker-compose >/dev/null 2>&1; then
+            docker-compose version
+          else
+            curl -L "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+            docker-compose version
+          fi
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests (Docker)
+        run: ./scripts/test-docker.sh
+
+      - name: Create Forgejo release
+        env:
+          # Personal access token with at least write:repository permission
+          REPO_ACCESS_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          # Derive version from Cargo.toml and release tag from the pushed ref
+          VERSION=$(sed -n 's/^version\s*=\s*"\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          TAG_NAME="${GITHUB_REF_NAME:-v${VERSION}}"
+
+          echo "Creating Forgejo release $TAG_NAME for crate version $VERSION"
+
+          API_URL="https://code.bhk-itsolutions.com/api/v1/repos/homeiot/db_handler/releases"
+
+          curl -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: token $REPO_ACCESS_TOKEN" \
+            -d "{
+              \"tag_name\": \"$TAG_NAME\",
+              \"name\": \"Release $TAG_NAME\",
+              \"body\": \"Automated release for crate db_handler $VERSION.\",
+              \"draft\": false,
+              \"prerelease\": false
+            }"
+

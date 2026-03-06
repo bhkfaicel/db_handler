@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, value, expire_at FROM keys WHERE mac = ? AND expire_at > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "expire_at",
+        "ordinal": 2,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "b1c1f378b83ab766a032e743f5418deb695e97566c91bc15995cb87abd6737f4"
+}

@@ -1,0 +1,6 @@
+{
+  "primary_db_url": ":memory:",
+  "history_db_url": "http://influxdb:8086",
+  "history_db_org": "test-org",
+  "history_db_token": "test-token-1234567890123456789012345678901234567890123456789012345678901234"
+}

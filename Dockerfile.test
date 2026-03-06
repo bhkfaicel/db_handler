@@ -1,0 +1,56 @@
+# Dockerfile for test environment
+FROM rust:1.93-slim
+
+# Install required system dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    sqlite3 \
+    libsqlite3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cargo-nextest (version compatible with Rust 1.91)
+RUN cargo install cargo-nextest --version 0.9.99 --locked
+
+# Forgejo registry for db_derive crate (pass CARGO_REGISTRIES_FORGEJO_TOKEN at build time, e.g. via .env)
+# Use a dedicated CARGO_HOME so our config is found (slim image may use /usr/local/cargo)
+ARG CARGO_REGISTRIES_FORGEJO_TOKEN
+ENV CARGO_HOME=/root/.cargo
+RUN mkdir -p "$CARGO_HOME" && \
+    printf '%s\n' \
+    '[registries.forgejo]' \
+    'index = "sparse+https://code.bhk-itsolutions.com/api/packages/homeiot/cargo/"' \
+    '' \
+    '[registry]' \
+    'global-credential-providers = ["cargo:token"]' \
+    > "$CARGO_HOME/config.toml"
+
+# Create working directory
+WORKDIR /app/db_handler
+
+# Copy dependency files (to optimize Docker cache)
+COPY db_handler/Cargo.toml db_handler/Cargo.lock ./
+COPY db_handler/.sqlx ./.sqlx
+
+# Create a dummy project to pre-compile dependencies
+RUN mkdir -p src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --features sensors,utoipaDoc,users --release && \
+    rm -rf src
+
+# Copy actual source code
+COPY db_handler/src ./src
+COPY db_handler/migrations ./migrations
+COPY db_handler/scripts ./scripts
+COPY db_handler/config.test.json ./config.test.json
+
+# Create directory for test data
+RUN mkdir -p /app/db_handler/data
+
+# Default environment variables for tests
+ENV RUST_BACKTRACE=1
+ENV SQLX_OFFLINE=true
+
+# Default command (can be overridden)
+CMD ["cargo", "test", "--features", "sensors,utoipaDoc,users"]

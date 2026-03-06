@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM refresh_tokens WHERE user_id = ? AND token = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "token",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "expire_at",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "is_used",
+        "ordinal": 5,
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "476b5afa7fc0d41d7be1d80046a429fc0494d8571c8f6a972f47ab6ac98bcfac"
+}

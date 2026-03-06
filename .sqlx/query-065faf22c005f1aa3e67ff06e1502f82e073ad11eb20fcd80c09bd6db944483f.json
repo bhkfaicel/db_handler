@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sensors WHERE mac = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "065faf22c005f1aa3e67ff06e1502f82e073ad11eb20fcd80c09bd6db944483f"
+}
