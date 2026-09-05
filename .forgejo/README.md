@@ -1,50 +1,123 @@
 # Forgejo Actions (CI)
 
-Security-sensitive checks, tag creation and publication logic live in this
-repository. `_rust-crate-checks.yml` is the shared local gate, and
-`actions/checkout` is pinned to an immutable commit SHA with
-`persist-credentials: false`.
+Workflows in this directory are **thin callers**. Tag / publish / checks logic lives in
+[`faicel/central_ci`](https://code.bhk-itsolutions.com/faicel/central_ci) (`create_tag_on_dev`,
+`create_tag_on_main`, `publish_on_tag`, `rust_crate_checks`, `validate_flow`).
+Only triggers and crate-specific inputs (`repository`, `enable_deny`, `test_command`, …) stay here.
 
-## Publish flow
+## Crate-specific gate (`test_command`)
+
+Every check-running caller passes `test_command: bash scripts/test.sh` so the
+shared gate tests this crate the way it must be tested:
+
+- in-memory SQLite (`config.test.json`, `SQLX_OFFLINE=true` from
+  `.cargo/config.toml`); Docker/InfluxDB integration (`scripts/test-docker.sh`)
+  stays local-only;
+- `libsqlite3-dev` is installed by the script itself when missing in the CI image;
+- tests run `--locked` with features `sensors,users,utoipaDoc` and
+  `--test-threads=1`, plus doc tests.
+
+The central clippy step is plain (`cargo clippy -- -D warnings`): the `sensors`
+and `users` modules are unconditionally public, and the only gated code
+(`utoipaDoc` derive blocks) is still compiled by the tests.
+
+## Publish flow (happy path)
 
 | Branch | Tag shape | Registry | Forgejo release |
 | --- | --- | --- | --- |
-| feature branch | none | — | none |
-| `dev` | `vX.Y.Z-rc` | `forgejorc` | prerelease |
+| `dev` | `vX.Y.Z-rc` | `forgejorc` (unstable / `homeiot-rc`) | prerelease |
 | `staging` | — (merge gate only) | — | — |
-| `main` | `vX.Y.Z` | `forgejo` | release |
+| `main` | `vX.Y.Z` | `forgejo` (stable / `homeiot`) | release |
 
-`Cargo.toml` / `CHANGELOG.md` always hold the **stable** base version.
+`Cargo.toml` / `CHANGELOG.md` always hold the **stable** base version (e.g. `0.1.0`).
 The stable/unstable split is done by **registry**, not by rewriting the crate version.
 
-1. Feature branch push → `check-on-feature-branch.yml`
-2. Merge to `dev` → `create-tag-on-dev.yml` creates `vX.Y.Z-rc`
-3. Tag push → `publish-on-tag.yml` publishes to `forgejorc`
-4. Merge `dev` → `staging` → `main`
-5. Push to `main` → `create-tag-on-main.yml` creates `vX.Y.Z` + `release/X.Y`
-6. Tag push → `publish-on-tag.yml` publishes to `forgejo`
+1. Bump `Cargo.toml` + `CHANGELOG` (required: each version publishes once per registry).
+2. Feature branch → checks via `check-on-feature-branch.yml`.
+3. Merge to `dev` → `create-tag-on-dev.yml` creates `vX.Y.Z-rc` (skips if the tag already exists).
+4. Tag push → `publish-on-tag.yml` publishes to `forgejorc` (client staging can pin this version).
+5. Merge `dev` → `staging` → `main` (`staging` does not tag or publish).
+6. Push to `main` → `create-tag-on-main.yml` creates `vX.Y.Z` **and** ensures `release/X.Y` exists.
+7. Tag push → `publish-on-tag.yml` publishes to `forgejo` (client prod).
+   Note: that workflow sets `enable_tag_check: false` because the tag already exists (it is the trigger); the tag check stays enabled on feature/`dev`/`main` pushes to prevent duplicate releases.
 
-`validate-branch-flow.yml` enforces PR direction: `* → dev`, `dev → staging`, `staging → main`.
+`validate-branch-flow.yml` enforces PR direction via shared `faicel/central_ci` → `validate_flow.yml`:
+`* → dev`, `dev → staging`, `staging → main`.
 
-## Shared gate (`_rust-crate-checks.yml`)
+Keep `Cargo.toml` and the latest `CHANGELOG.md` heading in sync (see `scripts/check-version-sync.sh`).
 
-1. `cargo fmt --all -- --check`
-2. `cargo clippy --features sensors,users,utoipaDoc`
-3. `cargo machete`
-4. `cargo deny check` (see `deny.toml`)
-5. `bash scripts/check-version-sync.sh`
-6. Reject duplicate stable tag (`enable_tag_check`, disabled on tag pushes)
-7. `bash scripts/test.sh` (`cargo test`, in-memory SQLite)
+Registries are defined in [`.cargo/config.toml`](../.cargo/config.toml).
 
-Tests use `config.test.json` and `SQLX_OFFLINE=true`. Docker/InfluxDB tests
-(`scripts/test-docker.sh`) are for local integration only.
+## Maintenance branches (`release/X.Y`)
+
+### Why
+
+`dev` keeps moving (features → next minor). A client or prod may stay on `1.0.0`.
+If a bug is found in `1.0.0` while `dev` already has `1.1.0` work, fixing only on `dev`
+would force the client to take unwanted features. A **`release/1.0`** line lets you
+ship `1.0.1` without `1.1.0`.
+
+```text
+main / tag v1.0.0 ──► release/1.0 ──► 1.0.1, 1.0.2   (hotfixes only)
+                  └──► dev ─────────► 1.1.0-rc …     (features)
+```
+
+### Automation on `main`
+
+When `create-tag-on-main.yml` publishes the first stable `vX.Y.Z` of a minor line, it
+creates `release/X.Y` at that commit (via `scripts/release-branch-name.sh`:
+`1.0.8` → `release/1.0`).
+
+- If `release/X.Y` **already exists**, CI leaves it unchanged (no force-update).
+- Hotfix commits belong **on** `release/X.Y`, then cherry-pick/backport to `dev`/`main`
+  so the fix is not lost on the next minor.
+
+### Hotfix checklist (manual for now)
+
+1. `git checkout -b hotfix/… release/1.0` (or branch from `release/1.0`).
+2. Fix the bug; bump patch in `Cargo.toml` + `CHANGELOG` (`1.0.0` → `1.0.1`).
+3. Merge into `release/1.0`.
+4. Tag/publish as needed (`v1.0.1-rc` → forgejorc and/or `v1.0.1` → forgejo).
+   Hotfix publish from `release/*` is **not** automated yet.
+5. Cherry-pick the fix onto `dev` (and `main` if required).
+
+### What does *not* create `release/X.Y`
+
+| Event | Creates `release/X.Y`? |
+| --- | --- |
+| Push / merge to `staging` | No (`staging` is only a gate) |
+| Push to `dev` / tag `-rc` | No (unstable channel) |
+| First stable tag on `main` for that `X.Y` | **Yes** |
+| Later stable tags on same `X.Y` (e.g. `1.0.9` from main) | No (branch already exists; left alone) |
 
 ## Protecting this directory
 
-Protected file patterns on `main`:
+A single repository secret (`RUNNER_TOKEN`) is shared across checkout, tag push,
+`cargo publish`, and Forgejo releases. That is acceptable because branch
+protection on `main` uses **Protected file patterns**:
 
 ```text
 .gitea/**/*.yml;.forgejo/**/*.yml
 ```
 
-Secret: `RUNNER_TOKEN` (read repo, push tags, publish packages, create releases).
+Those YAML workflows cannot be changed by a direct push even when the user has
+write access to the branch (Forgejo Settings → Branches → Protection rules).
+Without that control, a contributor could alter a workflow to exfiltrate the
+token. Prefer this path protection over splitting many PATs when one-token
+rotation is simpler.
+
+## Accepted risk: reusable workflows track the mutable `@main` ref
+
+Date: 2026-09-05
+
+The five reusable workflows in this directory (`check-on-feature-branch.yml`,
+`create-tag-on-dev.yml`, `create-tag-on-main.yml`, `publish-on-tag.yml`,
+`validate-branch-flow.yml`) call `faicel/central_ci/.forgejo/workflows/*.yml@main`,
+a **mutable** ref. The push-triggered jobs pass `RUNNER_TOKEN` to whatever
+`@main` contains at run time, so central-repository code executes with that
+secret on every run.
+
+The repository owner has explicitly accepted this supply-chain risk for now
+(same decision as `lis2dh12` and the other aligned repositories).
+Revisit this decision to pin the `uses:` references to an immutable commit SHA
+of `faicel/central_ci` when practical.

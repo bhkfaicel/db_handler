@@ -46,7 +46,7 @@ where
         return Err(anyhow::anyhow!("No string columns found"));
     }
     // Verify that the `sort_key` is valid
-    let db_map = get_table_columns(&pool, table).await?;
+    let db_map = get_table_columns(pool, table).await?;
     let columns: Vec<String> = db_map.keys().cloned().collect();
     // if !columns.contains(&(pagination.sort_key.as_ref()).to_string()) {
     //     return Err(anyhow::anyhow!(

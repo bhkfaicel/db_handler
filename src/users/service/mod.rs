@@ -107,7 +107,6 @@ impl UserService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn add(&self, username: String, email: String, password: String) -> Result<u32> {
         let password_hash = hash_password(&password).map_err(|e| {
             if let Some(be) = e.downcast_ref::<bcrypt::BcryptError>() {
@@ -152,7 +151,6 @@ impl UserService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn get_by_id(&self, id: u32) -> Result<Option<User>> {
         self.repository
             .get_by_id(id)
@@ -190,7 +188,6 @@ impl UserService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn get_by_email_and_password(
         &self,
         email: String,
@@ -244,7 +241,6 @@ impl UserService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn find_by_string(
         &self,
         pagination_params: &PaginationParams,
@@ -287,7 +283,6 @@ impl UserService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn delete_by_id(&self, id: u32) -> Result<()> {
         self.repository
             .delete_by_id(id)
@@ -327,7 +322,6 @@ impl UserService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn update_by_id(
         &self,
         id: u32,

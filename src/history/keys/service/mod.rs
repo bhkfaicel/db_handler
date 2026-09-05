@@ -56,14 +56,13 @@ impl HistoricalKeyService {
     ///     Ok(())
     ///  }
     ///
-
     pub async fn add(&self, key: [u8; 32]) -> Result<HistoricalKey> {
         let mut expire_at: DateTime<Utc> = Utc::now();
-        expire_at = expire_at + Duration::days(30);
+        expire_at += Duration::days(30);
         let mut historical_key = HistoricalKey {
             id: 0,
             value: key.to_vec(),
-            expire_at: expire_at,
+            expire_at,
         };
         let id = self
             .repository
@@ -103,18 +102,17 @@ impl HistoricalKeyService {
     ///     Ok(())
     ///  }
     ///
-
     pub(crate) async fn add_with_transaction(
         &self,
         tx: &mut Transaction<'_, sqlx::Sqlite>,
         key: [u8; 32],
     ) -> Result<HistoricalKey> {
         let mut expire_at: DateTime<Utc> = Utc::now();
-        expire_at = expire_at + Duration::days(30);
+        expire_at += Duration::days(30);
         let mut historical_key = HistoricalKey {
             id: 0,
             value: key.to_vec(),
-            expire_at: expire_at,
+            expire_at,
         };
         let id = self
             .repository

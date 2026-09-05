@@ -47,7 +47,7 @@ impl SensorRepository {
             Ok(Some(Sensor {
                 id: record.id as u32,
                 mac: record.mac,
-                sensor_type: sensor_type,
+                sensor_type,
                 status,
             }))
         } else {
@@ -74,7 +74,7 @@ impl SensorRepository {
                     .map(|id| id as u32)
                     .ok_or_else(|| anyhow::anyhow!("ID is null"))?,
                 mac: record.mac,
-                sensor_type: sensor_type,
+                sensor_type,
                 status,
             }))
         } else {
@@ -171,7 +171,7 @@ impl SensorRepository {
         &self,
         pagination_params: &PaginationParams,
     ) -> Result<PaginatedResponse<Sensor>, anyhow::Error> {
-        get_paginated_results_by_string::<Sensor>(&*self.pool, "sensors", pagination_params).await
+        get_paginated_results_by_string::<Sensor>(&self.pool, "sensors", pagination_params).await
     }
 }
 

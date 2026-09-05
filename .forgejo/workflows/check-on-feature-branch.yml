@@ -1,18 +1,24 @@
-# On push to any branch EXCEPT dev, staging, and main: run shared Rust checks.
+# On push to any branch EXCEPT dev, staging, and main: run shared Rust checks (lint, clippy,
+# cargo deny, cargo test, version sync). No tag, no publish. Used for feature branches.
+#
+# Requires: RUNNER_TOKEN secret (PAT with read repo).
+# Shared checks: faicel/central_ci rust_crate_checks.yml
+# test_command keeps the crate-specific gate (SQLite dev deps, features, serial tests).
 
 name: Run checks on feature branches
 
 on:
   push:
-    branches:
-      - "*"
-      - "!dev"
-      - "!staging"
-      - "!main"
+    branches-ignore:
+      - dev
+      - staging
+      - main
 
 jobs:
   checks:
-    uses: ./.forgejo/workflows/_rust-crate-checks.yml
+    uses: faicel/central_ci/.forgejo/workflows/rust_crate_checks.yml@main
     with:
+      enable_deny: true
       test_command: bash scripts/test.sh
-    secrets: inherit
+    secrets:
+      RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}

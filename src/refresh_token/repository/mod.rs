@@ -42,7 +42,7 @@ impl RefreshTokenRepository {
         if let Some(record) = result {
             let id = record.id.ok_or_else(|| sqlx::Error::RowNotFound)? as u32;
             Ok(Some(RefreshToken {
-                id: id,
+                id,
                 user_id: record.user_id as u32,
                 token: record.token,
                 expire_at: DateTime::<Utc>::from_naive_utc_and_offset(record.expire_at, Utc),

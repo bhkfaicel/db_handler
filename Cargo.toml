@@ -1,6 +1,6 @@
 [package]
 name = "db_handler"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Home IoT backend library: SQLite primary DB, InfluxDB history, sensors, users, keys"
 repository = "https://code.bhk-itsolutions.com/homeiot/db_handler.git"
@@ -18,17 +18,14 @@ sqlx = { version = "0.8.6", features = ["sqlite","migrate","chrono","macros","ru
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 log = "0.4.29"
-env_logger = "0.11.9"
-once_cell = "1.21.3"
 chrono = {version = "0.4.44", features = ["serde"]}
 tokio = { version = "1.50.0", features = ["rt","macros"] }
-dotenvy = "0.15.7"
 async-trait = "0.1"
 futures = "0.3.32"
 # InfluxDB 2.x client (rustls for lighter, pure-Rust TLS)
 influxdb2 = { version = "0.5", features = ["rustls"], default-features = false }
-#db_derive = { version = "0.1", registry = "forgejo" }
-db_handler = { path = "../derive" }
+db_derive = { version = "1.0.0", registry = "forgejorc" }
+#db_derive = { path = "../derive" }
 
 [dev-dependencies]
 futures = "0.3"

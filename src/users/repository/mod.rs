@@ -146,7 +146,7 @@ impl UserRepository {
         &self,
         pagination_params: &PaginationParams,
     ) -> Result<PaginatedResponse<User>, anyhow::Error> {
-        get_paginated_results_by_string::<User>(&*self.pool, "users", pagination_params).await
+        get_paginated_results_by_string::<User>(&self.pool, "users", pagination_params).await
     }
 }
 

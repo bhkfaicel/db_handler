@@ -94,12 +94,7 @@ impl ContactSensorService {
         );
         match self
             .primary_repository
-            .update_by_mac(
-                sensor.id(),
-                &sensor.mac().to_string(),
-                is_open,
-                Utc::now().naive_utc(),
-            )
+            .update_by_mac(sensor.id(), sensor.mac(), is_open, Utc::now().naive_utc())
             .await
         {
             Ok(_) => {

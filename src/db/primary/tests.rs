@@ -658,10 +658,7 @@ async fn migrations_apply_exactly_once_across_boots() -> Result<()> {
     .fetch_one(&*pool)
     .await?
     .get("n");
-    assert_eq!(
-        open_close_rows, 1,
-        "second boot must NOT replay migrations"
-    );
+    assert_eq!(open_close_rows, 1, "second boot must NOT replay migrations");
     let ledger_after: i64 = sqlx::query("SELECT COUNT(*) AS n FROM schema_migrations")
         .fetch_one(&*pool)
         .await?
@@ -673,4 +670,3 @@ async fn migrations_apply_exactly_once_across_boots() -> Result<()> {
     cleanup(&original);
     Ok(())
 }
-

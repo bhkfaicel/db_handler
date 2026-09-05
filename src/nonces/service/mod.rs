@@ -61,7 +61,6 @@ impl NonceService {
     ///     Ok(())
     ///  }
     /// ```
-
     pub async fn add(&self, nonce: [u8; 12], mac: &str) -> Result<Nonce> {
         let mut nonce = Nonce {
             id: 0,

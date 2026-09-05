@@ -30,6 +30,9 @@ AMELIORATIONS.md
 REVUE_ARCHITECTURE.md
 TRANSACTIONS_LOGGING.md
 
+# Session development plans (working documents, not project docs)
+plan/
+
 # OS files
 .DS_Store
 Thumbs.db

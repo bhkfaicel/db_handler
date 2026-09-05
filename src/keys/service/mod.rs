@@ -66,7 +66,6 @@ impl KeyService {
     ///     Ok(())
     ///  }
     /// ```
-
     pub async fn add(&self, key: [u8; 32], mac: &str) -> Result<Key> {
         // Start a transaction to ensure atomicity
         let mut tx = self
@@ -154,7 +153,6 @@ impl KeyService {
     ///     Ok(())
     ///  }
     /// ```
-
     pub async fn get_by_mac(&self, mac: &str) -> Result<Key> {
         self.repository
             .get_by_mac(mac)

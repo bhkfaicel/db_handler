@@ -139,7 +139,6 @@ impl SensorService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn get_by_id(&self, id: u32) -> Result<Option<TypedSensor>> {
         let sensor = self
             .repository
@@ -180,7 +179,6 @@ impl SensorService {
     /// # Ok(())
     /// # }
     /// ```
-
     /// Gets a sensor by its MAC address, returning the typed sensor.
     ///
     /// # Arguments
@@ -286,7 +284,6 @@ impl SensorService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn delete_by_id(&self, id: u32) -> Result<()> {
         self.repository
             .delete_by_id(id)
@@ -319,7 +316,6 @@ impl SensorService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn delete_by_mac(&self, mac: &str) -> Result<()> {
         self.repository
             .delete_by_mac(mac)
@@ -359,7 +355,6 @@ impl SensorService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn update_by_mac(
         &self,
         mac: &str,
@@ -423,7 +418,6 @@ impl SensorService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn find_by_string(
         &self,
         pagination_params: &PaginationParams,

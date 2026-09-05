@@ -42,7 +42,6 @@ use std::{
 /// # Ok(())
 /// # }
 ///
-
 pub(crate) async fn get_primary_db_client() -> Result<SqlitePool> {
     let migrations: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
     let config = HomeIotConfig::new().context("Failed to load configuration")?;

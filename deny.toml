@@ -6,6 +6,25 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# All of these flow through the pinned `influxdb2 0.5 -> reqwest 0.11 ->
+# rustls 0.21` TLS stack: `influxdb2 0.5.2` is the newest release and still
+# depends on reqwest 0.11, so there is no semver-compatible upgrade path.
+# Revisit when influxdb2 (or its replacement) moves to the reqwest 0.12 /
+# rustls 0.23 stack; drop the ignores then.
+# - RUSTSEC-2024-0384: `instant` unmaintained
+# - RUSTSEC-2025-0134: rustls-pemfile unmaintained
+# - RUSTSEC-2026-0098 / RUSTSEC-2026-0099: name-constraint handling in
+#   rustls-webpki 0.101.x
+# - RUSTSEC-2026-0104: reachable panic in certificate revocation list parsing
+# - RUSTSEC-2026-0258: `require_rustls` crypto provider panics
+ignore = [
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2025-0134",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0258",
+]
 
 [licenses]
 confidence-threshold = 0.8
@@ -21,11 +40,19 @@ allow = [
     "Zlib",
     "OpenSSL",
     "CC0-1.0",
+    "MPL-2.0",
     "LicenseRef-HomeIoT-Personal-NonCommercial",
 ]
 
 [[licenses.clarify]]
 crate = "db_handler"
+expression = "LicenseRef-HomeIoT-Personal-NonCommercial"
+license-files = [{ path = "LICENSE", hash = 0xbeb0f056 }]
+
+# The local derive crate ships the same custom license text without an SPDX
+# expression; clarify points at its LICENSE file.
+[[licenses.clarify]]
+crate = "db_derive"
 expression = "LicenseRef-HomeIoT-Personal-NonCommercial"
 license-files = [{ path = "LICENSE", hash = 0xbeb0f056 }]
 

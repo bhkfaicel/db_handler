@@ -88,7 +88,6 @@ impl RefreshTokenService {
     ///     Ok(())
     ///  }
     /// ```
-
     pub async fn add(
         &self,
         user_id: u32,
@@ -98,10 +97,10 @@ impl RefreshTokenService {
     ) -> Result<RefreshToken> {
         let mut refresh_token = RefreshToken {
             id: 0,
-            user_id: user_id,
+            user_id,
             token: token.to_string(),
-            expire_at: expire_at,
-            created_at: created_at,
+            expire_at,
+            created_at,
             is_used: false,
         };
         let id = self
@@ -144,7 +143,6 @@ impl RefreshTokenService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn delete_by_user_id(&self, user_id: u32) -> Result<()> {
         self.repository
             .delete_by_user_id(user_id)
@@ -199,7 +197,6 @@ impl RefreshTokenService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn is_valid(&self, user_id: u32, token: &str) -> Result<bool> {
         let result = self
             .repository
@@ -254,7 +251,6 @@ impl RefreshTokenService {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn update_flag_by_token(&self, token: &str) -> Result<()> {
         self.repository
             .update_flag_by_token(token)
