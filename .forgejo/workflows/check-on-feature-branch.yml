@@ -1,0 +1,18 @@
+# On push to any branch EXCEPT dev, staging, and main: run shared Rust checks.
+
+name: Run checks on feature branches
+
+on:
+  push:
+    branches:
+      - "*"
+      - "!dev"
+      - "!staging"
+      - "!main"
+
+jobs:
+  checks:
+    uses: ./.forgejo/workflows/_rust-crate-checks.yml
+    with:
+      test_command: bash scripts/test.sh
+    secrets: inherit

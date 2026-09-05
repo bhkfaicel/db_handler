@@ -6,14 +6,26 @@ use std::{env, fs::File, io::Write};
 
 #[test]
 fn test_config_new_returns_error_when_file_not_found() {
-    let nonexistent = env::temp_dir().join("nonexistent_config_dir_12345").join("config.json");
+    let nonexistent = env::temp_dir()
+        .join("nonexistent_config_dir_12345")
+        .join("config.json");
+    // Environment variables are process-global: save and restore so this
+    // test cannot poison every later test that needs CONFIG_FILE.
+    let original = env::var("CONFIG_FILE").ok();
     env::set_var("CONFIG_FILE", nonexistent.to_str().unwrap());
     let result = HomeIotConfig::new();
-    let _ = env::remove_var("CONFIG_FILE");
+    match original {
+        Some(v) => env::set_var("CONFIG_FILE", v),
+        None => {
+            let _ = env::remove_var("CONFIG_FILE");
+        }
+    }
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("Failed to open config file") || err_msg.contains("No such file") || err_msg.contains("not found"),
+        err_msg.contains("Failed to open config file")
+            || err_msg.contains("No such file")
+            || err_msg.contains("not found"),
         "expected file-not-found message, got: {}",
         err_msg
     );
@@ -24,7 +36,8 @@ fn test_config_new_returns_error_when_json_invalid() {
     let tmp_dir = env::temp_dir();
     let path = tmp_dir.join("home_iot_config_invalid_test.json");
     let mut file = File::create(&path).expect("Failed to create temp config file");
-    file.write_all(b"{ invalid json }").expect("Failed to write");
+    file.write_all(b"{ invalid json }")
+        .expect("Failed to write");
     drop(file);
 
     let original = env::var("CONFIG_FILE").ok();
@@ -82,10 +95,12 @@ fn test_home_iot_config_new_reads_from_config_file() {
             "history_db_org": "test-org",
             "history_db_token": "test-token"
         }"#;
-        file.write_all(json.as_bytes()).expect("Failed to write temp config");
+        file.write_all(json.as_bytes())
+            .expect("Failed to write temp config");
     }
 
-    let config = HomeIotConfig::load_from_path(path.to_str().unwrap()).expect("Valid config file should load");
+    let config = HomeIotConfig::load_from_path(path.to_str().unwrap())
+        .expect("Valid config file should load");
 
     assert_eq!(config.primary_db_url(), "sqlite:/tmp/home_iot.db");
     assert_eq!(config.history_db_url(), "http://localhost:8086");

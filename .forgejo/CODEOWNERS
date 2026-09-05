@@ -1,0 +1,4 @@
+# CODEOWNERS for CI and workflows
+
+/.forgejo/workflows/*  @homeiot/Owners
+/scripts/*             @homeiot/Owners

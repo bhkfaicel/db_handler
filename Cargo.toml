@@ -2,8 +2,11 @@
 name = "db_handler"
 version = "0.1.0"
 edition = "2021"
+description = "Home IoT backend library: SQLite primary DB, InfluxDB history, sensors, users, keys"
 repository = "https://code.bhk-itsolutions.com/homeiot/db_handler.git"
 authors = ["Faicel <faicelbhk@gmail.com>"]
+license-file = "LICENSE"
+publish = ["forgejo", "forgejorc"]
 
 [dependencies]
 include_dir = "0.7"
@@ -24,7 +27,8 @@ async-trait = "0.1"
 futures = "0.3.32"
 # InfluxDB 2.x client (rustls for lighter, pure-Rust TLS)
 influxdb2 = { version = "0.5", features = ["rustls"], default-features = false }
-db_derive = { version = "0.1", registry = "forgejo" }
+#db_derive = { version = "0.1", registry = "forgejo" }
+db_handler = { path = "../derive" }
 
 [dev-dependencies]
 futures = "0.3"

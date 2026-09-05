@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
-use crate::{nonces::model::Nonce, db::primary::repository::PrimaryDbRepository};
+use crate::{db::primary::repository::PrimaryDbRepository, nonces::model::Nonce};
 /// Repository for performing CRUD operations on `Nonces` entities.
 pub(crate) struct NonceRepository {
     pool: Arc<SqlitePool>,

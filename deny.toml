@@ -1,0 +1,43 @@
+# cargo-deny policy for db_handler.
+# Run locally: `cargo deny check`
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "OpenSSL",
+    "CC0-1.0",
+    "LicenseRef-HomeIoT-Personal-NonCommercial",
+]
+
+[[licenses.clarify]]
+crate = "db_handler"
+expression = "LicenseRef-HomeIoT-Personal-NonCommercial"
+license-files = [{ path = "LICENSE", hash = 0xbeb0f056 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [
+    "https://github.com/rust-lang/crates.io-index",
+    "sparse+https://code.bhk-itsolutions.com/api/packages/homeiot/cargo/",
+    "sparse+https://code.bhk-itsolutions.com/api/packages/homeiot-rc/cargo/",
+]

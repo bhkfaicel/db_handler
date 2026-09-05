@@ -104,14 +104,58 @@ pub(crate) async fn get_primary_db_client() -> Result<SqlitePool> {
         .connect_with(connect_options)
         .await?;
 
-    // Sort migrations by filename to ensure correct execution order
-    let mut migration_files: Vec<_> = migrations.files().collect();
+    // Schema migration ledger: records applied files so later boots skip
+    // them instead of replaying (replaying is wasted work and unsafe for
+    // non-idempotent DDL such as table rebuilds). Legacy databases that
+    // pre-date the ledger replay their idempotent files exactly once more,
+    // then get recorded like any other.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (\
+             name TEXT PRIMARY KEY, \
+             applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Sort migrations by filename to ensure correct execution order.
+    // Only `.sql` files are executed; other files (e.g. README.md) are ignored.
+    let mut migration_files: Vec<_> = migrations
+        .files()
+        .filter(|f| {
+            f.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+        })
+        .collect();
     migration_files.sort_by_key(|f| f.path().to_string_lossy().to_string());
     for file in migration_files {
-        if let Some(content) = file.contents_utf8() {
-            sqlx::query(content).execute(&pool).await?;
-            println!("file migration {} Ok", file.path().display());
+        let Some(content) = file.contents_utf8() else {
+            continue;
+        };
+        let name = file
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .with_context(|| format!("unnamed migration file {}", file.path().display()))?;
+        let already_applied = sqlx::query("SELECT 1 FROM schema_migrations WHERE name = ?")
+            .bind(&name)
+            .fetch_optional(&pool)
+            .await?
+            .is_some();
+        if already_applied {
+            continue;
         }
+        // Each migration runs inside its own transaction together with its
+        // ledger row: an interrupted boot can never persist a half-applied
+        // schema change.
+        let mut tx = pool.begin().await?;
+        sqlx::query(content).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO schema_migrations (name) VALUES (?)")
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        println!("migration {name} applied");
     }
     Ok(pool)
 }

@@ -224,6 +224,23 @@ impl SensorService {
         Ok(typed_sensor)
     }
 
+    /// Lists all sensors having exactly the provided status.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The status to filter on.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Sensor>)` - Every matching sensor (empty vector if none).
+    /// * `Err(SensorError)` - If a database error occurs.
+    pub async fn list_by_status(&self, status: &Status) -> Result<Vec<Sensor>> {
+        self.repository
+            .list_by_status(status)
+            .await
+            .map_err(map_anyhow_to_sensor_error)
+    }
+
     /// Gets a sensor by its MAC address, returning the raw sensor.
     ///
     /// This is a convenience method for cases where you need the raw `Sensor` type.

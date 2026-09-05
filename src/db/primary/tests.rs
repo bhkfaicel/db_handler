@@ -5,7 +5,10 @@ use crate::{
 };
 use anyhow::Result;
 use db_derive::HasColumns;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row,
+};
 use std::time::Duration;
 #[tokio::test]
 async fn test_get_some_fields() -> Result<()> {
@@ -577,3 +580,97 @@ async fn test_one_field_does_not_exists() -> Result<()> {
 
     Ok(())
 }
+
+/// Simulates two gateway boots against one file-backed database and asserts
+/// the migration ledger makes the second boot a no-op: applied files are
+/// skipped and rows created between boots survive untouched.
+#[tokio::test]
+async fn migrations_apply_exactly_once_across_boots() -> Result<()> {
+    use crate::db::connection::Connection;
+    use std::env;
+
+    // Isolated file-backed database for this test only.
+    let db_path =
+        env::temp_dir().join(format!("dbh_migrations_once_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let config_path =
+        env::temp_dir().join(format!("dbh_migrations_cfg_{}.json", std::process::id()));
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"{{"primary_db_url":"sqlite://{}","history_db_url":"http://localhost:8086","history_db_org":"t","history_db_token":"t"}}"#,
+            db_path.display()
+        ),
+    )?;
+
+    // Environment variables are process-global: save and restore so this
+    // test cannot poison later ones (single-threaded suite).
+    let original = env::var("CONFIG_FILE").ok();
+    env::set_var("CONFIG_FILE", &config_path);
+
+    let cleanup = |original: &Option<String>| {
+        match original {
+            Some(v) => env::set_var("CONFIG_FILE", v),
+            None => {
+                let _ = env::remove_var("CONFIG_FILE");
+            }
+        }
+        let _ = std::fs::remove_file(&config_path);
+        let _ = std::fs::remove_file(&db_path);
+    };
+
+    // Boot 1: fresh database, every migration applies.
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client();
+    let ledger: i64 = sqlx::query("SELECT COUNT(*) AS n FROM schema_migrations")
+        .fetch_one(&*pool)
+        .await?
+        .get("n");
+    assert!(
+        ledger >= 4,
+        "all embedded migrations recorded, got {ledger}"
+    );
+
+    // Live row created after deployment, like a sensor reporting state.
+    sqlx::query("INSERT INTO sensors (mac, status) VALUES ('00:1B:44:11:3A:E1', 'Installed')")
+        .execute(&*pool)
+        .await?;
+    let id: i64 = sqlx::query("SELECT id FROM sensors WHERE mac = '00:1B:44:11:3A:E1'")
+        .fetch_one(&*pool)
+        .await?
+        .get("id");
+    sqlx::query(
+        "INSERT INTO open_close_sensors (sensor_id, sensor_mac, is_open, updated_at) \
+         VALUES (?, '00:1B:44:11:3A:E1', 0, datetime('now'))",
+    )
+    .bind(id)
+    .execute(&*pool)
+    .await?;
+    drop(pool);
+    drop(connection);
+
+    // Boot 2: same database file; the ledger must skip every migration.
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client();
+    let open_close_rows: i64 = sqlx::query(
+        "SELECT COUNT(*) AS n FROM open_close_sensors WHERE sensor_mac = '00:1B:44:11:3A:E1'",
+    )
+    .fetch_one(&*pool)
+    .await?
+    .get("n");
+    assert_eq!(
+        open_close_rows, 1,
+        "second boot must NOT replay migrations"
+    );
+    let ledger_after: i64 = sqlx::query("SELECT COUNT(*) AS n FROM schema_migrations")
+        .fetch_one(&*pool)
+        .await?
+        .get("n");
+    assert_eq!(ledger_after, ledger, "no migration may be recorded twice");
+
+    drop(pool);
+    drop(connection);
+    cleanup(&original);
+    Ok(())
+}
+

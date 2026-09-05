@@ -164,9 +164,11 @@ Make sure your database has all migrations applied:
 # Option 1: Use an existing DB
 export DATABASE_URL="sqlite:./path/to/your/database.db"
 
-# Option 2: Create a temporary DB and apply migrations
+# Option 2: Create a temporary DB and apply migrations (see migrations/README.md)
+sqlite3 /tmp/sqlx_prepare.db < migrations/20250101000000_create_refresh_tokens_table.sql
 sqlite3 /tmp/sqlx_prepare.db < migrations/20250226015426_init.sql
 sqlite3 /tmp/sqlx_prepare.db < migrations/20250610_init.sql
+sqlite3 /tmp/sqlx_prepare.db < migrations/20260120_add_unique_to_open_close_sensors.sql
 export DATABASE_URL="sqlite:/tmp/sqlx_prepare.db"
 ```
 

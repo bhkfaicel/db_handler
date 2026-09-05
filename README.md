@@ -95,12 +95,20 @@ See [README.DOCKER.md](README.DOCKER.md) for options (`--keep`, manual commands,
 
 **Troubleshooting (Docker tests):** If the 4 `set_history` tests fail with InfluxDB error **"no space left on device"**, Docker has run out of disk space. Free space and retry: `docker system prune -a` (removes unused images/containers), and/or increase the Docker Desktop virtual disk size in settings.
 
-To run tests locally (requires SQLite and optional InfluxDB), set `CONFIG_FILE` to the test config and run cargo:
+To run tests locally without Docker (in-memory SQLite, no InfluxDB):
 
 ```bash
-export CONFIG_FILE=config.test.json
-cargo test --features "sensors,utoipaDoc,users"
+./scripts/test.sh
 ```
+
+This runs the default suite with `--test-threads=1` (four `set_history` tests are
+`#[ignore]`). To run InfluxDB integration tests locally:
+
+```bash
+cargo test -- --ignored set_history
+```
+
+Or use `./scripts/test-docker.sh` for the full suite including InfluxDB.
 
 ## Project layout
 

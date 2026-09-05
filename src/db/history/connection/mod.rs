@@ -36,8 +36,8 @@ use influxdb2::Client;
 /// # }
 ///
 pub(crate) async fn get_time_series_database_client() -> Result<Client> {
-    let config = HomeIotConfig::new()
-        .map_err(|e| SensorHistoryError::configuration(e.to_string()))?;
+    let config =
+        HomeIotConfig::new().map_err(|e| SensorHistoryError::configuration(e.to_string()))?;
     let url = config.history_db_url();
     let org = config.history_db_org();
     let token = config.history_db_token();

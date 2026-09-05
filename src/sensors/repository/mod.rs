@@ -6,7 +6,7 @@ use crate::{
     sensors::model::{ProductType, Sensor, Status},
 };
 use anyhow::{anyhow, Ok, Result};
-use sqlx::{QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use std::{str::FromStr, sync::Arc};
 
 /// Repository for performing CRUD operations on `Sensor` entities.
@@ -94,6 +94,36 @@ impl SensorRepository {
             .execute(&*self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Lists every sensor currently in the given status.
+    ///
+    /// Gateway boot logic uses it to find commissioning runs left unfinished
+    /// (`InProgress`) so they can be granted one bounded pairing retry
+    /// opportunity. Uses the runtime query API on purpose: adding a new
+    /// compile-time macro would require regenerating the offline statement
+    /// cache, while existing macros stay untouched.
+    pub(crate) async fn list_by_status(&self, status: &Status) -> Result<Vec<Sensor>> {
+        let rows = sqlx::query("SELECT id, mac, status, sensor_type FROM sensors WHERE status = ?")
+            .bind(status.to_string())
+            .fetch_all(&*self.pool)
+            .await?;
+
+        let mut sensors = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row.try_get("id")?;
+            let mac: String = row.try_get("mac")?;
+            let status_raw: String = row.try_get("status")?;
+            let sensor_type: Option<String> = row.try_get("sensor_type")?;
+            sensors.push(Sensor {
+                id: u32::try_from(id).map_err(|e| anyhow!("sensor id out of range: {e}"))?,
+                mac,
+                sensor_type: sensor_type.and_then(|st| st.parse::<ProductType>().ok()),
+                status: Status::from_str(&status_raw)
+                    .map_err(|_| anyhow!("Invalid status value"))?,
+            });
+        }
+        Ok(sensors)
     }
 
     pub(crate) async fn update_by_mac(

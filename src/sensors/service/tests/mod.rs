@@ -13,4 +13,6 @@ mod find_by_string;
 #[cfg(test)]
 mod get_by_mac;
 #[cfg(test)]
+mod list_by_status;
+#[cfg(test)]
 mod update_by_mac;

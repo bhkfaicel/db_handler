@@ -22,11 +22,14 @@ fn sensor_error_to_contact_error(
     crate::sensors::contact::error::ContactSensorError::operation(e.to_string())
 }
 
-/// Tests for recording history data for a contact sensor.
+/// Integration tests for `ContactSensorService::set_history` (primary DB + InfluxDB).
 ///
-/// Note: These tests require InfluxDB to be running and configured.
-/// If InfluxDB is not available, the tests will fail with a connection error.
+/// These require a live InfluxDB instance matching `config.test.json`.
+/// CI runs `cargo test` without Docker; run them locally with:
+///   `cargo test -- --ignored set_history`
+/// or `scripts/test-docker.sh`.
 #[tokio::test]
+#[ignore = "requires InfluxDB; run with cargo test -- --ignored or scripts/test-docker.sh"]
 async fn should_record_history_without_vibration_count() -> Result<()> {
     let connection = Connection::new().await.map_err(to_contact_sensor_error)?;
     let service = ContactSensorService::new(connection.clone());
@@ -76,6 +79,7 @@ async fn should_record_history_without_vibration_count() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires InfluxDB; run with cargo test -- --ignored or scripts/test-docker.sh"]
 async fn should_record_history_with_vibration_count() -> Result<()> {
     let connection = Connection::new().await.map_err(to_contact_sensor_error)?;
     let service = ContactSensorService::new(connection.clone());
@@ -133,6 +137,7 @@ async fn should_record_history_with_vibration_count() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires InfluxDB; run with cargo test -- --ignored or scripts/test-docker.sh"]
 async fn should_record_history_with_sensor_timestamp() -> Result<()> {
     let connection = Connection::new().await.map_err(to_contact_sensor_error)?;
     let service = ContactSensorService::new(connection.clone());
@@ -187,6 +192,7 @@ async fn should_record_history_with_sensor_timestamp() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires InfluxDB; run with cargo test -- --ignored or scripts/test-docker.sh"]
 async fn should_update_is_open_when_value_already_exists() -> Result<()> {
     let connection = Connection::new().await.map_err(to_contact_sensor_error)?;
     let service = ContactSensorService::new(connection.clone());

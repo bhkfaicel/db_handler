@@ -4,5 +4,8 @@ SQLX_OFFLINE = "true"
 [registries.forgejo]
 index = "sparse+https://code.bhk-itsolutions.com/api/packages/homeiot/cargo/"
 
+[registries.forgejorc]
+index = "sparse+https://code.bhk-itsolutions.com/api/packages/homeiot-rc/cargo/"
+
 [registry]
 global-credential-providers = ["cargo:token"]

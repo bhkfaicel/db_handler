@@ -19,6 +19,6 @@ CREATE TABLE IF NOT EXISTS open_close_sensors (
     sensor_mac TEXT NOT NULL,
     is_open BOOLEAN  NOT NULL,
     updated_at DATETIME NOT NULL,
-    FOREIGN KEY (sensor_id) REFERENCES sensors(id),
-    FOREIGN KEY (sensor_mac) REFERENCES sensors(mac)
+    FOREIGN KEY (sensor_id) REFERENCES sensors(id) ON DELETE CASCADE,
+    FOREIGN KEY (sensor_mac) REFERENCES sensors(mac) ON DELETE CASCADE
 );
