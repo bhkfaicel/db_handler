@@ -306,6 +306,7 @@ dependencies = [
  "include_dir",
  "influxdb2",
  "log",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

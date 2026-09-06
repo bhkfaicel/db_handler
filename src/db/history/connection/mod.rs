@@ -1,6 +1,7 @@
 use crate::common::helpers::config::HomeIotConfig;
 use anyhow::Result;
 use influxdb2::Client;
+use std::time::Duration;
 
 /// Initializes and returns a time-series database client.
 ///
@@ -26,11 +27,21 @@ use influxdb2::Client;
 ///   with the configured InfluxDB bucket name that history writes target
 /// * `Err(anyhow::Error)` - If configuration or client creation fails
 ///
+/// # Arguments
+///
+/// * `connect_timeout` - Maximum wait for the TCP/TLS connection to the
+///   InfluxDB server to establish
+/// * `request_timeout` - Maximum wall-clock time for one complete HTTP
+///   request/response exchange against the server
+///
 // Connection infrastructure must not depend on a domain error type: returning
 // `anyhow::Result` decouples the `db` tree from the sensor history error
 // module, which is the prerequisite for compiling `db` without the `sensors`
 // feature.
-pub(crate) async fn get_time_series_database_client() -> Result<(Client, String)> {
+pub(crate) async fn get_time_series_database_client(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<(Client, String)> {
     // The configuration loader already reports failures as `anyhow::Error`;
     // propagating it preserves the original error chain (no string re-wrap).
     let config = HomeIotConfig::new()?;
@@ -40,5 +51,26 @@ pub(crate) async fn get_time_series_database_client() -> Result<(Client, String)
     // The bucket travels with the client through the construction chain
     // (`Connection` -> services -> repository) instead of a hardcoded
     // constant: deployments rename it in configuration, not in code.
-    Ok((Client::new(url, org, token), config.bucket_name()))
+    //
+    // The client is built through `ClientBuilder::with_builder` so the
+    // underlying reqwest client carries connect and request timeouts.
+    // Without them a hung or unreachable InfluxDB server would stall
+    // `set_history` indefinitely (the HTTP call never returns) while the
+    // corresponding SQLite update is already committed, piling up sensor
+    // events behind a stuck write. Connect failures surface within the
+    // connect window; a server that accepts but never answers is cut off
+    // by the overall request timeout.
+    let client = influxdb2::ClientBuilder::with_builder(
+        reqwest::ClientBuilder::new()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout),
+        url,
+        org,
+        token,
+    )
+    .build()?;
+    Ok((client, config.bucket_name()))
 }
+
+#[cfg(test)]
+mod tests;

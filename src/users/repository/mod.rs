@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::users::model::{User, UserSortKey};
 
 use super::model::InternalUser;
-use super::password::verify_password;
+use super::password::verify_password_async;
 
 /// Repository for performing CRUD operations on `User` entities.
 ///
@@ -128,7 +128,10 @@ impl UserRepository {
         .map_err(map_sqlx_to_common_error)?;
 
         if let Some(record) = result {
-            match verify_password(&password, &record.password_hash) {
+            // bcrypt verification costs ~100-300 ms of CPU at cost 12; the
+            // async helper runs it on the blocking pool so the tokio worker
+            // stays responsive while logins are processed.
+            match verify_password_async(password, record.password_hash).await {
                 Ok(true) => {
                     let id = record.id.ok_or_else(|| {
                         CommonError::Operation("Missing id in database record".to_string())

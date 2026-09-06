@@ -12,8 +12,9 @@ use std::{
 ///
 /// Reads the database URL from a configuration file specified by the `CONFIG_FILE`
 /// environment variable. Supports both in-memory and file-based databases, enables
-/// foreign-key enforcement, configures shared cache or memory journal as appropriate,
-/// and applies any pending migrations automatically (errors are ignored in `test` mode).
+/// foreign-key enforcement, configures the journal mode as appropriate (WAL for
+/// file databases, MEMORY plus a shared-cache URI for in-memory ones), and applies
+/// any pending migrations automatically (errors are ignored in `test` mode).
 ///
 /// # Environment Variables
 ///
@@ -24,7 +25,7 @@ use std::{
 /// - If `primary_db_url == ":memory:"`, opens an in-memory database with shared cache
 ///   (`file::memory:?cache=shared`) and uses `MEMORY` journal mode.
 /// - Otherwise, opens (or creates) the file at `primary_db_url` with foreign keys enabled
-///   and shared cache.
+///   and WAL journal mode.
 ///
 /// # Returns
 ///
@@ -92,7 +93,27 @@ pub(crate) async fn get_primary_db_client() -> Result<SqlitePool> {
             .filename(&db_path)
             .create_if_missing(true)
             .foreign_keys(true)
-            .shared_cache(true)
+            // WAL journal mode: readers work on snapshots and no longer block
+            // the writer, so concurrent sensor upserts, key-rotation
+            // transactions and nonce inserts do not queue behind a committing
+            // writer (rollback-journal commits need exclusive access while
+            // active readers drain, which turns contention into latency
+            // spikes under burst load). WAL removes that commit-phase
+            // exclusivity.
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        // `synchronous` stays at the SQLite default FULL (pinned by the
+        // connection tests): switching to NORMAL could roll back
+        // security-relevant commits (anti-replay nonces, refresh tokens)
+        // after a power loss, so it remains an explicit user decision
+        // that has deliberately NOT been applied.
+        //
+        // `shared_cache` is deliberately NOT set on the file branch: a
+        // pool of connections sharing one page cache contends on
+        // table-level locks (SQLITE_LOCKED) instead of progressing
+        // concurrently. WAL plus the 5 s busy_timeout cover residual
+        // write contention. The single shared in-memory database keeps
+        // its `cache=shared` URI in the `:memory:` branch above, the one
+        // setup where shared cache is the right choice.
         // No at-rest encryption pragma here: no SQLCipher backend exists in
         // the dependency graph, so an encryption pragma would be a silent
         // no-op and a configured key a false guarantee. At-rest protection
@@ -165,3 +186,6 @@ pub(crate) async fn get_primary_db_client() -> Result<SqlitePool> {
     }
     Ok(pool)
 }
+
+#[cfg(test)]
+mod tests;

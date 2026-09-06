@@ -64,7 +64,11 @@ impl Repository {
             .await
         {
             Ok(_) => {
-                log::info!(
+                // Hot path: this line runs on every successful sensor event,
+                // so success details stay at debug level (info would pay a
+                // format + I/O per event on the gateway); failures below
+                // remain error-level.
+                log::debug!(
                     "Successfully wrote history data to InfluxDB - bucket: {}, sensor_id: {}, sensor_mac: {}",
                     bucket,
                     sensor_id,

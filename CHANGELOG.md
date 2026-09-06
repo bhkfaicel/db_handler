@@ -69,6 +69,12 @@ and this project adheres to semantic versioning.
 
 ### Added
 
+- Public `RefreshTokenService::cleanup_expired()` hook that deletes every
+  expired refresh token across all users in one call, for boot-time or
+  operator-triggered sweeps. It is deliberately caller-dependent — the
+  library schedules no background work on its own — because token issuance
+  only purges the logging-in user's rows, so tokens of users who never log
+  in again are reachable only through this explicit sweep.
 - Public generic pagination model `db::primary::models::PaginationParams<K>`
   where `K: AsRef<str> + Display + Serialize` is the sort-key type: domains
   pass their typed sort-key enum, plain `String` works where no typed key
@@ -105,9 +111,62 @@ and this project adheres to semantic versioning.
   representative values), and the contact sensor view (construction from a
   wrapped sensor plus its accessors). Each model module now follows the
   project test layout with a `tests/` directory next to its source file.
+- Deterministic regression guard for the password-hashing offload: a unit
+  test runs the async hash helper on a single-threaded runtime while a
+  counter-ticking progress task observes scheduling, and asserts that the
+  worker makes progress during the hashing await — possible only while
+  bcrypt executes on the blocking pool. An inline (non-offloaded) bcrypt
+  call would block the worker with no yield point and yield exactly zero
+  progress, failing the test. Binary, wall-clock-free and
+  core-count-independent by design.
 
 ### Changed
 
+- The redundant composite `UNIQUE (value, mac)` constraint on the `nonces`
+  table is removed by a new migration that rebuilds the table: the
+  column-level `UNIQUE` on `value` is strictly stronger (it rejects a
+  repeated value whatever the MAC, which the pair constraint would accept),
+  so the composite only added one extra B-tree write to every nonce insert
+  with zero additional enforcement. The rebuild is safe with foreign keys
+  enabled (no foreign-keys pragma inside the migration: SQLite ignores it
+  inside the runner's per-file transaction, which also records the ledger
+  row and makes the whole rebuild atomic), preserves row identifiers, and
+  leaves `PRAGMA foreign_key_check` empty. Tests pin the fresh-database
+  behavior (uniques, cascade, foreign-key integrity), a legacy-deployment
+  replay (old schema plus pre-filled ledger migrated through the production
+  boot: data preserved, constraints and cascade intact, ledger row added)
+  and a full rollback on an interrupted rebuild (original table restored,
+  no residue, no ledger row).
+- The redundant manual index on `refresh_tokens.token` is dropped by a new
+  migration: the `token TEXT NOT NULL UNIQUE` column constraint already
+  maintains an implicit unique index that serves every token-based lookup,
+  so the manual index only doubled the B-tree write and storage cost of
+  each token insert and delete. Token lookups and updates keep resolving
+  through an index search after the migration (pinned by a repository
+  test asserting the query plan).
+- Bounded retention for the two previously insert-only tables, piggybacked
+  on their guaranteed write paths: key rotation (`KeyService::add`) now
+  purges historical keys past their 30-day retention window inside the same
+  transaction that records the rotated-out key — steady state stays around
+  720 rows per sensor at one rotation per hour, and the purge is a full
+  scan of that bounded table, so no index on `expire_at` is added on
+  purpose (one extra B-tree write per insert to accelerate a negligible
+  scan is a documented ceiling) — and refresh-token issuance
+  (`RefreshTokenService::add`) now deletes the user's expired and
+  already-used tokens before inserting the new one, riding the existing
+  per-user index. Tokens of users who never log in again are covered by
+  the added `cleanup_expired` hook instead (see above). No existing
+  rotation or issuance semantics changed beyond the added purges.
+- The time-series client is now built with connect and request timeouts
+  (5 s and 30 s in production): a hung or unreachable InfluxDB server used
+  to stall history writes indefinitely — the HTTP call never returned
+  while the corresponding SQLite update was already committed — and the
+  write now fails within the configured windows instead. The factory takes
+  the two durations as parameters so tests can use short values. The
+  per-event success log line on the history write path is demoted from
+  info to debug level: it executed on every sensor event, and success
+  details are not worth a format plus I/O per event on the gateway
+  (failures remain error-level).
 - The Docker test runner now mirrors the standard test gate: the compose
   test command runs plain `cargo test` with the same flags as
   `scripts/test.sh` (`--locked --features sensors,users,utoipaDoc`,
@@ -231,11 +290,41 @@ forms). The two empty one-line placeholder test files in the
   One behavioral consequence: sorting by a column that exists in the table
   but is absent from the model's mapped columns is now rejected instead of
   being silently allowed, and the dedicated core test pins that rejection.
-  A dedicated core test passes a sort key absent from the model's columns
-  (`not_a_column`) over an otherwise valid model and asserts the explicit
-  "Invalid sort key" error, directly proving the `ORDER BY` whitelist.
-  The now-unused PRAGMA-based column introspection helper is deleted
-  together with its core-only dead-code warning.
+   A dedicated core test passes a sort key absent from the model's columns
+   (`not_a_column`) over an otherwise valid model and asserts the explicit
+   "Invalid sort key" error, directly proving the `ORDER BY` whitelist.
+   The now-unused PRAGMA-based column introspection helper is deleted
+   together with its core-only dead-code warning.
+- The file-based primary SQLite database now runs in WAL journal mode: the
+  connect options set `journal_mode` to WAL, so readers work on snapshots
+  and no longer queue behind a committing writer (in the previous
+  rollback-journal mode every commit needed exclusive access while active
+  readers drained, turning concurrent sensor bursts, key rotations and
+  nonce inserts into latency spikes bounded only by the 5 s busy timeout).
+  The `shared_cache` option is removed from the file branch on purpose: a
+  pool of connections sharing one page cache contends on table-level locks
+  (`SQLITE_LOCKED`) instead of progressing concurrently, and WAL plus the
+  busy timeout cover residual write contention; the single shared
+  in-memory database keeps its `cache=shared` URI, where shared cache is
+  the right setup. Durability is unchanged: `synchronous` stays at the
+  SQLite default FULL (pinning a deliberate decision; NORMAL could roll
+  back security-relevant commits such as anti-replay nonces after a power
+  loss and remains an option for the user to request explicitly). A
+  dedicated connection test opens a temporary file database through the
+  production factory and asserts `PRAGMA journal_mode = wal` and
+  `PRAGMA synchronous = 2`, and re-checks that the `:memory:` branch still
+  yields a working pool.
+- Password hashing and verification no longer run inline on the async
+  runtime: the crate-internal password helpers gain `*_async` wrappers that
+  move the password (and stored hash) into `tokio::task::spawn_blocking`,
+  so the ~100-300 ms of pure CPU a cost-12 bcrypt call burns executes on
+  the dedicated blocking pool instead of stalling the calling tokio worker
+  and starving every other task it carries (concurrent logins in
+  particular). All async call sites are routed through the wrappers: login
+  credential verification in the user repository, and password hashing in
+  user creation and update in the user service. Return values and error
+  variants are unchanged; the synchronous primitives remain for non-async
+  reuse and unit tests.
 
 ### Removed
 
@@ -323,6 +412,8 @@ forms). The two empty one-line placeholder test files in the
 - The migrations test index pointed at the pre-reorganization single-file
   location (`src/db/primary/tests.rs`); it now points at the actual
   `tests/mod.rs` layout.
+- The migrations README file table now lists the two migrations added by the
+  performance work (duplicate refresh-token index drop, nonces rebuild).
 
 ## [0.2.0] - 2026-09-06
 

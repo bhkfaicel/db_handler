@@ -2,6 +2,7 @@ use crate::db::primary::error::Result;
 use crate::db::primary::repository::PrimaryDbRepository;
 use crate::db::primary::service::map_sqlx_to_common_error;
 use crate::history::keys::model::HistoricalKey;
+use chrono::{DateTime, Utc};
 use sqlx::{SqlitePool, Transaction};
 use std::sync::Arc;
 
@@ -49,6 +50,29 @@ impl HistoricalKeyRepository {
         .await
         .map_err(map_sqlx_to_common_error)?;
         Ok(result.last_insert_rowid() as u32)
+    }
+
+    /// Delete every historical key whose retention window has elapsed,
+    /// within the caller's transaction.
+    ///
+    /// Executed on the key-rotation path (`KeyService::add`), which is the
+    /// only writer of this table, so the steady state is bounded by the
+    /// 30-day retention window (one rotation per hour: about 720 rows per
+    /// sensor). The DELETE is a full scan of that bounded table
+    /// (sub-millisecond at this size); no index on `expire_at` is added on
+    /// purpose: it would cost one extra B-tree write per insert to
+    /// accelerate a scan that stays negligible. Revisit only with a
+    /// measured regression.
+    pub(crate) async fn delete_expired_with_transaction(
+        &self,
+        tx: &mut Transaction<'_, sqlx::Sqlite>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query!("DELETE FROM historical_keys WHERE expire_at < ?", now)
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+        Ok(())
     }
 }
 

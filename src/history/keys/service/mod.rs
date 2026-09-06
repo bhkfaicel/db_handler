@@ -112,6 +112,20 @@ impl HistoricalKeyService {
         historical_key.id = id;
         Ok(historical_key)
     }
+
+    /// Deletes expired historical keys within the caller's transaction
+    /// (delegates to the repository; its documentation carries the
+    /// bounded-growth rationale for this retention purge).
+    pub(crate) async fn delete_expired_with_transaction(
+        &self,
+        tx: &mut Transaction<'_, sqlx::Sqlite>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.repository
+            .delete_expired_with_transaction(tx, now)
+            .await?;
+        Ok(())
+    }
 }
 #[cfg(test)]
 mod tests;

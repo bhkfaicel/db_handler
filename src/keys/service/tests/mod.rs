@@ -247,3 +247,58 @@ async fn test_add_key_succeeds_when_no_previous_key_exists() -> anyhow::Result<(
     assert!(key.id > 0);
     Ok(())
 }
+
+/// Rotation doubles as the retention trigger: the same transaction that
+/// records the rotated-out key purges historical keys past their 30-day
+/// window, while unexpired rows (the seeded valid one and the fresh
+/// rotation row) must stay.
+#[tokio::test]
+async fn test_add_key_purges_expired_historical_keys() -> anyhow::Result<()> {
+    use chrono::{Duration, Utc};
+
+    let connection = Connection::new().await?;
+    let service = KeyService::new(connection.clone());
+    let sensor_service = SensorService::new(connection.clone());
+    let historical_key_service = HistoricalKeyService::new(connection.clone());
+
+    let mac = "AA:BB:26:06:19:B1";
+    let _ = sensor_service
+        .add(mac)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Seed one expired historical key (raw SQL: the service always stamps
+    // rows with a future expiration) and one still-valid row.
+    let expired_value = [7; 32];
+    sqlx::query("INSERT INTO historical_keys (value, expire_at) VALUES (?, ?)")
+        .bind(expired_value.to_vec())
+        .bind(Utc::now() - Duration::hours(1))
+        .execute(&*connection.primary_db_client())
+        .await?;
+    let _ = historical_key_service.add([8; 32]).await?;
+
+    // Rotation must purge the expired row and keep the valid ones.
+    let _ = service.add([9; 32], mac).await?;
+
+    let expired_left =
+        sqlx::query_as::<_, HistoricalKey>("SELECT * FROM historical_keys WHERE value = ?")
+            .bind(expired_value.to_vec())
+            .fetch_optional(&*connection.primary_db_client())
+            .await?;
+    assert!(
+        expired_left.is_none(),
+        "the expired historical key must be purged by rotation"
+    );
+
+    let remaining =
+        sqlx::query_as::<_, HistoricalKey>("SELECT * FROM historical_keys WHERE expire_at > ?")
+            .bind(Utc::now())
+            .fetch_all(&*connection.primary_db_client())
+            .await?;
+    assert_eq!(
+        remaining.len(),
+        2,
+        "the seeded valid row and the fresh rotation row must stay"
+    );
+    Ok(())
+}

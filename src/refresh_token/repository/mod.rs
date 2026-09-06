@@ -89,6 +89,42 @@ impl RefreshTokenRepository {
         .map_err(map_sqlx_to_common_error)?;
         Ok(())
     }
+
+    /// Delete the expired and already-used refresh tokens of one user.
+    ///
+    /// Executed on the token-issuance path (`RefreshTokenService::add`)
+    /// before the insert, so per-user growth stays bounded to that user's
+    /// live tokens. The `user_id` predicate rides the existing
+    /// `idx_refresh_tokens_user_id` index.
+    pub(crate) async fn delete_expired_for_user(
+        &self,
+        user_id: u32,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query!(
+            "DELETE FROM refresh_tokens WHERE user_id = ? AND (expire_at < ? OR is_used = 1)",
+            user_id,
+            now
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
+
+    /// Delete every expired refresh token across all users.
+    ///
+    /// Global sweep behind the public `RefreshTokenService::cleanup_expired`
+    /// hook: token issuance only purges the logging-in user's rows, so
+    /// tokens of users who never log in again are reached exclusively by
+    /// this explicit, caller-dependent sweep.
+    pub(crate) async fn delete_expired(&self, now: DateTime<Utc>) -> Result<()> {
+        sqlx::query!("DELETE FROM refresh_tokens WHERE expire_at < ?", now)
+            .execute(&*self.pool)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

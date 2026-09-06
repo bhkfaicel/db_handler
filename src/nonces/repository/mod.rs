@@ -21,8 +21,9 @@ impl PrimaryDbRepository for NonceRepository {
 impl NonceRepository {
     /// Insert a nonce.
     ///
-    /// Duplicate nonces (the `value` column and the `(value, mac)` pair are
-    /// both declared UNIQUE in the schema) surface as
+    /// Duplicate nonces (the `value` column is UNIQUE in the schema; the
+    /// former composite `UNIQUE (value, mac)` index was redundant against
+    /// it and was removed by a table-rebuild migration) surface as
     /// `CommonError::UniqueViolation`; foreign-key failures (unknown MAC)
     /// keep the underlying sqlx error inside the generic `Database` variant.
     pub(crate) async fn insert(&self, nonce: &Nonce) -> Result<u32> {

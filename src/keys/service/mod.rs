@@ -78,6 +78,19 @@ impl KeyService {
             .map_err(map_sqlx_error)?;
 
         let historical_key_service = HistoricalKeyService::new(self.connection.clone());
+
+        // Retention piggyback: purge historical keys whose retention
+        // window has elapsed inside this same guaranteed transaction.
+        // Rotation is the only writer of the table, so the steady state
+        // stays bounded (about 720 rows per sensor over the 30-day
+        // window) and the purge is a scan of that bounded table; no
+        // `expire_at` index is added on purpose — one more B-tree write
+        // per insert to accelerate a negligible scan is a documented
+        // ceiling.
+        historical_key_service
+            .delete_expired_with_transaction(&mut tx, Utc::now())
+            .await?;
+
         historical_key_service
             .add_with_transaction(&mut tx, key)
             .await?;

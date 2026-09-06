@@ -9,7 +9,7 @@ use crate::{
     users::{
         error::{Result, UserError},
         model::{PaginationParams, User},
-        password::hash_password,
+        password::hash_password_async,
         repository::UserRepository,
     },
 };
@@ -89,7 +89,12 @@ impl UserService {
     /// # }
     /// ```
     pub async fn add(&self, username: String, email: String, password: String) -> Result<u32> {
-        let password_hash = hash_password(&password).map_err(map_hash_error)?;
+        // The hash runs on the blocking pool via the async helper: a cost-12
+        // bcrypt call is ~100-300 ms of CPU and must never stall the tokio
+        // worker inline.
+        let password_hash = hash_password_async(password)
+            .await
+            .map_err(map_hash_error)?;
         let user = InternalUser::new(0, username, email.clone(), Some(password_hash));
         self.repository
             .insert(&user)
@@ -300,7 +305,12 @@ impl UserService {
         // the service, and the repository only persists the hash it is
         // handed.
         let password_hash = match password {
-            Some(password) => Some(hash_password(&password).map_err(map_hash_error)?),
+            // Async helper again: bcrypt on the blocking pool, never inline.
+            Some(password) => Some(
+                hash_password_async(password)
+                    .await
+                    .map_err(map_hash_error)?,
+            ),
             None => None,
         };
         self.repository

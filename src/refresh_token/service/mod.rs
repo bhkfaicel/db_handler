@@ -99,6 +99,19 @@ impl RefreshTokenService {
             created_at,
             is_used: false,
         };
+
+        // Retention piggyback: purge this user's expired and used tokens
+        // before issuing the new one. Issuance is a guaranteed path, so
+        // per-user growth stays bounded to the user's live tokens, and the
+        // purge rides the existing `idx_refresh_tokens_user_id` index.
+        // Tokens of users who never log in again are not reached here: the
+        // public `cleanup_expired` hook covers that residual (documented as
+        // caller-dependent, not a resolution).
+        self.repository
+            .delete_expired_for_user(user_id, Utc::now())
+            .await
+            .map_err(map_common_error)?;
+
         let id = self
             .repository
             .insert(&refresh_token)
@@ -106,6 +119,40 @@ impl RefreshTokenService {
             .map_err(map_common_error)?;
         refresh_token.id = id;
         Ok(refresh_token)
+    }
+
+    /// Deletes every expired refresh token across all users.
+    ///
+    /// Caller-dependent boot-time sweep: token issuance only purges the
+    /// logging-in user's rows, so tokens of users who never log in again
+    /// linger until an operator (or the application boot sequence)
+    /// invokes this method. The library never schedules background work
+    /// on its own; calling this hook is the caller's decision.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the sweep was successful.
+    /// * `Err(RefreshTokenError::Common(CommonError::Database(_)))` - If a database error occurs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::refresh_token::service::RefreshTokenService;
+    /// use db_handler::db::connection::Connection;
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let connection = Connection::new().await?;
+    ///     let service = RefreshTokenService::new(connection);
+    ///     service.cleanup_expired().await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn cleanup_expired(&self) -> Result<()> {
+        self.repository
+            .delete_expired(Utc::now())
+            .await
+            .map_err(map_common_error)?;
+        Ok(())
     }
 
     /// Deletes all refresh tokens and all associated tokens for the user.
