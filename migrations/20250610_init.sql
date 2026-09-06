@@ -1,11 +1,11 @@
--- Table des données spécifiques cles historique
+-- Historical keys table
 CREATE TABLE IF NOT EXISTS historical_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     value BLOB NOT NULL UNIQUE,
     expire_at DATETIME NOT NULL
 );
 
--- Table des données spécifiques aux cles
+-- Keys table
 CREATE TABLE IF NOT EXISTS keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     value BLOB NOT NULL UNIQUE,
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS keys (
     FOREIGN KEY (value) REFERENCES historical_keys(value)
 );
 
--- Table des données spécifiques aux nonce
+-- Nonces table
 CREATE TABLE IF NOT EXISTS nonces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     value BLOB NOT NULL UNIQUE,

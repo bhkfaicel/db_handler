@@ -1,16 +1,29 @@
 use chrono::{DateTime, Utc};
 
-use crate::{
-    db::history::{repository::HistoryDbRepository, service::HistoryDbService},
-    history::sensors::{contact::repository::Repository, error::Result, model::VibrationCount},
+use crate::history::sensors::{
+    contact::repository::Repository, error::Result, model::VibrationCount,
 };
 use std::sync::Arc;
+
 pub struct ContactSensorHistoryService {
     repository: Arc<Repository>,
 }
-impl HistoryDbService for ContactSensorHistoryService {
-    fn new(client: Arc<influxdb2::Client>) -> Self {
-        let repository = Arc::new(Repository::new(client.clone()));
+
+impl ContactSensorHistoryService {
+    /// Creates a new instance of the service with an InfluxDB client.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - InfluxDB client
+    /// * `bucket` - Name of the InfluxDB bucket history writes target,
+    ///   taken from the configuration file
+    ///
+    /// # Returns
+    ///
+    /// A new instance of the service initialized with the provided client
+    /// and bucket name.
+    pub fn new(client: Arc<influxdb2::Client>, bucket: String) -> Self {
+        let repository = Arc::new(Repository::new(client, bucket));
         Self { repository }
     }
 }

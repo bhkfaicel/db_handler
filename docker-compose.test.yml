@@ -36,10 +36,9 @@ services:
       influxdb:
         condition: service_healthy
     environment:
+      # Test configuration is provided as JSON (InfluxDB URL/org/token are
+      # read from this file, not from environment variables).
       - CONFIG_FILE=/app/db_handler/config.test.json
-      - TIMESERIES_DB_URL=http://influxdb:8086
-      - TIMESERIES_DB_ORG=test-org
-      - TIMESERIES_DB_TOKEN=test-token-1234567890123456789012345678901234567890123456789012345678901234
       - RUST_BACKTRACE=1
       - SQLX_OFFLINE=true
     volumes:
@@ -52,10 +51,11 @@ services:
       sh -c "
         echo 'Waiting for InfluxDB to be ready...' &&
         sleep 5 &&
-        echo 'Running tests...' &&
-        cargo nextest run --features sensors,utoipaDoc,users --no-fail-fast &&
-        cargo nextest run --features sensors,utoipaDoc,users --no-fail-fast --run-ignored all &&
-        cargo test --doc --features sensors,utoipaDoc,users
+        echo 'Pass 1/2: standard gate (same as scripts/test.sh)...' &&
+        cargo test --locked --features sensors,users,utoipaDoc -- --test-threads=1 &&
+        cargo test --doc --locked --features sensors,users,utoipaDoc &&
+        echo 'Pass 2/2: InfluxDB-backed ignored tests...' &&
+        cargo test --locked --features sensors,users,utoipaDoc -- --run-ignored all --test-threads=1
       "
 
 volumes:

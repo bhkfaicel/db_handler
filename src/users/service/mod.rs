@@ -1,71 +1,52 @@
-use sqlx::error::ErrorKind;
 use std::sync::Arc;
 
 use crate::{
-    common::helpers::controller::hash_password,
     db::connection::Connection,
     db::primary::{
-        models::{PaginatedResponse, PaginationParams as CommonPaginationParams},
-        repository::PrimaryDbRepository,
-        service::{map_sqlx_to_common_error, Service},
+        error::CommonError, models::PaginatedResponse, repository::PrimaryDbRepository,
+        service::Service,
     },
     users::{
         error::{Result, UserError},
         model::{PaginationParams, User},
+        password::hash_password,
         repository::UserRepository,
     },
 };
 
 use super::model::InternalUser;
 
-/// Helper function to convert `sqlx::Error` to `UserError`.
+/// Constraint name SQLite reports for the inline `UNIQUE` on the
+/// `users.email` column (initial migration).
+const USERS_EMAIL_CONSTRAINT: &str = "users.email";
+
+/// Maps a structured `CommonError` from the repository to the user domain
+/// error.
 ///
-/// This function detects UNIQUE constraint violations (e.g., duplicate email) and converts
-/// them to `UserError::EmailAlreadyExists`. Other database errors are converted via
-/// the centralized `map_sqlx_to_common_error` function.
-fn map_sqlx_error(e: sqlx::Error) -> UserError {
-    // Check for UNIQUE constraint violation (e.g., duplicate email)
-    if let sqlx::Error::Database(db_err) = &e {
-        if db_err.kind() == ErrorKind::UniqueViolation {
-            // Check if it's an email constraint violation
-            let error_message = db_err.message();
-            if error_message.contains("users.email")
-                || error_message.contains("UNIQUE constraint failed")
-            {
-                // Try to extract email from error message
-                let email = extract_email_from_error(error_message)
-                    .unwrap_or_else(|| "unknown".to_string());
-                return UserError::email_already_exists(email);
-            }
+/// Unique violations arrive with their constraint name already decoded in a
+/// single central place (`CommonError::from_sqlx`); the users table has
+/// exactly one unique constraint (`users.email`), so violating it means a
+/// duplicate email. Every other error passes through as the transparent
+/// `Common` variant, preserving the original database error. `email` is the
+/// address the caller was targeting, used only to populate the
+/// `EmailAlreadyExists` payload.
+fn map_common_error(e: CommonError, email: Option<&str>) -> UserError {
+    match e {
+        CommonError::UniqueViolation { constraint } if constraint == USERS_EMAIL_CONSTRAINT => {
+            UserError::email_already_exists(email.unwrap_or("unknown"))
         }
+        other => other.into(),
     }
-    // For all other errors, use the centralized conversion
-    map_sqlx_to_common_error(e).into()
 }
 
-/// Helper function to extract email from error message.
-fn extract_email_from_error(_error_msg: &str) -> Option<String> {
-    // SQLite UNIQUE constraint errors typically don't contain the actual value
-    // but we can try to extract it if present
-    // For now, return None as SQLite doesn't include the value in the error
-    None
-}
-
-/// Helper function to convert `anyhow::Error` to `UserError`.
-///
-/// This function extracts `sqlx::Error` from `anyhow::Error` and uses `map_sqlx_error`
-/// for proper conversion. For non-SQLx errors, it converts them to `UserError::operation`.
-fn map_anyhow_to_user_error(e: anyhow::Error) -> UserError {
-    // Try to extract sqlx::Error from anyhow::Error
-    match e.downcast::<sqlx::Error>() {
-        Ok(sqlx_err) => {
-            // Use the centralized map_sqlx_error function
-            map_sqlx_error(sqlx_err)
-        }
-        Err(e) => {
-            // For non-SQLx errors, use operation error
-            UserError::operation(e.to_string())
-        }
+/// Maps a password-hashing failure to the domain error: a real bcrypt
+/// failure keeps the dedicated `PasswordHashing` variant, anything else is
+/// reported as a generic operation error.
+fn map_hash_error(e: anyhow::Error) -> UserError {
+    if let Some(be) = e.downcast_ref::<bcrypt::BcryptError>() {
+        UserError::PasswordHashing(be.to_string())
+    } else {
+        UserError::operation(e.to_string())
     }
 }
 
@@ -108,18 +89,14 @@ impl UserService {
     /// # }
     /// ```
     pub async fn add(&self, username: String, email: String, password: String) -> Result<u32> {
-        let password_hash = hash_password(&password).map_err(|e| {
-            if let Some(be) = e.downcast_ref::<bcrypt::BcryptError>() {
-                UserError::PasswordHashing(be.to_string())
-            } else {
-                UserError::operation(e.to_string())
-            }
-        })?;
-        let user = InternalUser::new(0, username, email, Some(password_hash));
+        let password_hash = hash_password(&password).map_err(map_hash_error)?;
+        let user = InternalUser::new(0, username, email.clone(), Some(password_hash));
         self.repository
             .insert(&user)
             .await
-            .map_err(map_anyhow_to_user_error)
+            // The repository reports failures as structured `CommonError`
+            // (unique violations included); map them to the domain error.
+            .map_err(|e| map_common_error(e, Some(&email)))
     }
 
     /// Retrieves a user by its ID.
@@ -152,10 +129,7 @@ impl UserService {
     /// # }
     /// ```
     pub async fn get_by_id(&self, id: u32) -> Result<Option<User>> {
-        self.repository
-            .get_by_id(id)
-            .await
-            .map_err(map_anyhow_to_user_error)
+        self.repository.get_by_id(id).await.map_err(UserError::from)
     }
 
     /// Retrieves a user by its Email and clear password.
@@ -196,7 +170,7 @@ impl UserService {
         self.repository
             .get_by_email_and_password(email, password)
             .await
-            .map_err(map_anyhow_to_user_error)
+            .map_err(UserError::from)
     }
 
     /// Find users by a string and paginate the results.
@@ -245,17 +219,10 @@ impl UserService {
         &self,
         pagination_params: &PaginationParams,
     ) -> Result<PaginatedResponse<User>> {
-        let pagination_params = CommonPaginationParams {
-            skip: pagination_params.skip,
-            nbr: pagination_params.nbr,
-            sort_key: pagination_params.sort_key.to_string(),
-            sort: pagination_params.sort,
-            searched_value: pagination_params.searched_value.clone(),
-        };
         self.repository
-            .find_by_string(&pagination_params)
+            .find_by_string(pagination_params)
             .await
-            .map_err(map_anyhow_to_user_error)
+            .map_err(UserError::from)
     }
 
     /// Deletes a sensor by its ID.
@@ -287,7 +254,7 @@ impl UserService {
         self.repository
             .delete_by_id(id)
             .await
-            .map_err(map_anyhow_to_user_error)
+            .map_err(UserError::from)
     }
 
     /// Update a user by its ID.
@@ -329,10 +296,19 @@ impl UserService {
         email: Option<String>,
         password: Option<String>,
     ) -> Result<u32> {
+        // Hashing is domain logic: the clear password is hashed here, in
+        // the service, and the repository only persists the hash it is
+        // handed.
+        let password_hash = match password {
+            Some(password) => Some(hash_password(&password).map_err(map_hash_error)?),
+            None => None,
+        };
         self.repository
-            .update_by_id(id, username, email, password)
+            .update_by_id(id, username, email.clone(), password_hash)
             .await
-            .map_err(map_anyhow_to_user_error)
+            // A unique violation here means the target email already
+            // belongs to another user; report it with that email.
+            .map_err(|e| map_common_error(e, email.as_deref()))
     }
 }
 

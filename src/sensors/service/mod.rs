@@ -1,13 +1,11 @@
-use sqlx::error::ErrorKind;
 use std::sync::Arc;
 
 use crate::{
     db::{
         connection::Connection,
         primary::{
-            models::{PaginatedResponse, PaginationParams as CommonPaginationParams},
-            repository::PrimaryDbRepository,
-            service::{map_sqlx_to_common_error, Service},
+            error::CommonError, models::PaginatedResponse, repository::PrimaryDbRepository,
+            service::Service,
         },
     },
     sensors::{
@@ -16,75 +14,26 @@ use crate::{
         repository::SensorRepository,
     },
 };
-/// Helper function to convert `sqlx::Error` to `SensorError`.
+
+/// Constraint name SQLite reports for the unique index backing the
+/// `sensors.mac` column (inline `UNIQUE` in the initial migration).
+const SENSORS_MAC_CONSTRAINT: &str = "sensors.mac";
+
+/// Maps a structured `CommonError` from the repository to the sensor
+/// domain error.
 ///
-/// This function detects UNIQUE constraint violations (e.g., duplicate MAC) and converts
-/// them to `SensorError::DuplicateMac`. Other database errors are converted via
-/// the centralized `map_sqlx_to_common_error` function.
-fn map_sqlx_error(e: sqlx::Error, mac: Option<&str>) -> SensorError {
-    // Check for UNIQUE constraint violation (e.g., duplicate MAC)
-    if let sqlx::Error::Database(db_err) = &e {
-        if db_err.kind() == ErrorKind::UniqueViolation {
-            // Check if it's a MAC constraint violation
-            let error_message = db_err.message();
-            if error_message.contains("sensors.mac")
-                || error_message.contains("UNIQUE constraint failed")
-            {
-                // Use provided MAC if available, otherwise try to extract from error message
-                let mac_address = mac
-                    .map(|m| m.to_string())
-                    .or_else(|| extract_mac_from_error(error_message))
-                    .unwrap_or_else(|| "duplicate entry".to_string());
-                return SensorError::duplicate_mac(mac_address);
-            }
+/// Unique violations arrive with their constraint name already decoded in a
+/// single central place (`CommonError::from_sqlx`); the sensors table has
+/// exactly one unique constraint (`sensors.mac`), so violating it means a
+/// duplicate MAC. Every other error passes through as the transparent
+/// `Common` variant, preserving the original database error.
+fn map_common_error(e: CommonError, mac: &str) -> SensorError {
+    match e {
+        CommonError::UniqueViolation { constraint } if constraint == SENSORS_MAC_CONSTRAINT => {
+            SensorError::duplicate_mac(mac)
         }
+        other => other.into(),
     }
-    // For all other errors, use the centralized conversion
-    map_sqlx_to_common_error(e).into()
-}
-
-// Helper function to convert anyhow::Error to SensorError
-fn map_anyhow_to_sensor_error(e: anyhow::Error) -> SensorError {
-    map_anyhow_to_sensor_error_with_mac(e, None)
-}
-
-// Helper function to convert anyhow::Error to SensorError with optional MAC for UNIQUE constraint errors
-fn map_anyhow_to_sensor_error_with_mac(e: anyhow::Error, mac: Option<&str>) -> SensorError {
-    // Try to extract sqlx::Error from anyhow::Error
-    match e.downcast::<sqlx::Error>() {
-        Ok(sqlx_err) => {
-            // Use the centralized map_sqlx_error function
-            map_sqlx_error(sqlx_err, mac)
-        }
-        Err(e) => {
-            // For non-SQLx errors, use operation error
-            SensorError::operation(e.to_string())
-        }
-    }
-}
-
-// Helper function to extract MAC address from error message
-fn extract_mac_from_error(error_msg: &str) -> Option<String> {
-    // SQLite UNIQUE constraint errors typically don't contain the actual value
-    // But we can try to find MAC-like patterns in the message
-    // Simple pattern matching without regex: look for "mac" keyword near the error
-    if error_msg.to_lowercase().contains("mac") {
-        // Try to find a MAC address pattern manually
-        // Format: XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX
-        let parts: Vec<&str> = error_msg.split_whitespace().collect();
-        for part in parts {
-            // Check if part looks like a MAC address (contains colons or dashes)
-            if part.contains(':') || part.contains('-') {
-                let chars: Vec<char> = part.chars().collect();
-                // Simple check: should have 5 separators (colons or dashes)
-                let separator_count = chars.iter().filter(|c| **c == ':' || **c == '-').count();
-                if separator_count == 5 && part.len() >= 17 {
-                    return Some(part.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 pub struct SensorService {
@@ -107,7 +56,9 @@ impl SensorService {
         self.repository
             .insert(&sensor)
             .await
-            .map_err(|e| map_anyhow_to_sensor_error_with_mac(e, Some(mac)))
+            // The repository reports failures as structured `CommonError`
+            // (unique violations included); map them to the domain error.
+            .map_err(|e| map_common_error(e, mac))
     }
 
     /// Retrieves a sensor by its ID.
@@ -140,11 +91,9 @@ impl SensorService {
     /// # }
     /// ```
     pub async fn get_by_id(&self, id: u32) -> Result<Option<TypedSensor>> {
-        let sensor = self
-            .repository
-            .get_by_id(id)
-            .await
-            .map_err(map_anyhow_to_sensor_error)?;
+        // The repository already reports errors as `CommonError`, which
+        // converts into the transparent `SensorError::Common` via `?`.
+        let sensor = self.repository.get_by_id(id).await?;
 
         let typed_sensor = sensor.map(TypedSensor::from_sensor);
         Ok(typed_sensor)
@@ -211,11 +160,7 @@ impl SensorService {
         &self,
         mac: &str,
     ) -> Result<Option<crate::sensors::model::TypedSensor>> {
-        let sensor = self
-            .repository
-            .get_by_mac(mac)
-            .await
-            .map_err(map_anyhow_to_sensor_error)?;
+        let sensor = self.repository.get_by_mac(mac).await?;
 
         let typed_sensor = sensor.map(crate::sensors::model::TypedSensor::from_sensor);
 
@@ -233,10 +178,7 @@ impl SensorService {
     /// * `Ok(Vec<Sensor>)` - Every matching sensor (empty vector if none).
     /// * `Err(SensorError)` - If a database error occurs.
     pub async fn list_by_status(&self, status: &Status) -> Result<Vec<Sensor>> {
-        self.repository
-            .list_by_status(status)
-            .await
-            .map_err(map_anyhow_to_sensor_error)
+        Ok(self.repository.list_by_status(status).await?)
     }
 
     /// Gets a sensor by its MAC address, returning the raw sensor.
@@ -253,10 +195,7 @@ impl SensorService {
     /// * `Ok(None)` - If no sensor with the given MAC address exists.
     /// * `Err(SensorError)` - If an error occurs during retrieval.
     pub async fn get_by_mac_raw(&self, mac: &str) -> Result<Option<Sensor>> {
-        self.repository
-            .get_by_mac(mac)
-            .await
-            .map_err(map_anyhow_to_sensor_error)
+        Ok(self.repository.get_by_mac(mac).await?)
     }
 
     /// Deletes a sensor by its ID.
@@ -285,10 +224,7 @@ impl SensorService {
     /// # }
     /// ```
     pub async fn delete_by_id(&self, id: u32) -> Result<()> {
-        self.repository
-            .delete_by_id(id)
-            .await
-            .map_err(map_anyhow_to_sensor_error)
+        Ok(self.repository.delete_by_id(id).await?)
     }
 
     /// Deletes a sensor by its Mac.
@@ -317,10 +253,7 @@ impl SensorService {
     /// # }
     /// ```
     pub async fn delete_by_mac(&self, mac: &str) -> Result<()> {
-        self.repository
-            .delete_by_mac(mac)
-            .await
-            .map_err(map_anyhow_to_sensor_error)
+        Ok(self.repository.delete_by_mac(mac).await?)
     }
 
     /// Updates a sensor by its Mac.
@@ -361,19 +294,21 @@ impl SensorService {
         status: Option<Status>,
         sensor_type: Option<ProductType>,
     ) -> Result<u32> {
-        self.repository
+        // Business rules are validated here, before any SQL is sent: a
+        // sensor may only enter the `InProgress` status at creation time,
+        // and an update must change at least one field to be meaningful.
+        if status == Some(Status::InProgress) {
+            return Err(SensorError::CannotUpdateToInProgress);
+        }
+        if status.is_none() && sensor_type.is_none() {
+            return Err(SensorError::NoFieldsForUpdate);
+        }
+        // The repository is pure data access and reports failures as
+        // structured `CommonError`, converted through `?`.
+        Ok(self
+            .repository
             .update_by_mac(mac, status, sensor_type)
-            .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("InProgress") {
-                    SensorError::CannotUpdateToInProgress
-                } else if msg.contains("At least one field") {
-                    SensorError::NoFieldsForUpdate
-                } else {
-                    SensorError::operation(msg)
-                }
-            })
+            .await?)
     }
 
     /// Find sensors by a string and paginate the results.
@@ -422,17 +357,7 @@ impl SensorService {
         &self,
         pagination_params: &PaginationParams,
     ) -> Result<PaginatedResponse<Sensor>> {
-        let pagination_params = CommonPaginationParams {
-            skip: pagination_params.skip,
-            nbr: pagination_params.nbr,
-            sort_key: pagination_params.sort_key.to_string(),
-            sort: pagination_params.sort,
-            searched_value: pagination_params.searched_value.clone(),
-        };
-        self.repository
-            .find_by_string(&pagination_params)
-            .await
-            .map_err(map_anyhow_to_sensor_error)
+        Ok(self.repository.find_by_string(pagination_params).await?)
     }
 }
 #[cfg(test)]

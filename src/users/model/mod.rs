@@ -1,10 +1,10 @@
 #[cfg(feature = "utoipaDoc")]
-use utoipa::{IntoParams, ToSchema};
+use utoipa::ToSchema;
 
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::{db::primary::models::SortOrder, drives::columns::HasColumns};
+use crate::drives::columns::HasColumns;
 use db_derive::HasColumns;
 
 #[derive(Debug, FromRow, HasColumns, PartialEq, Serialize, Deserialize)]
@@ -98,18 +98,13 @@ impl std::fmt::Display for UserSortKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipaDoc", derive(IntoParams, ToSchema))]
-#[cfg_attr(feature = "utoipaDoc", into_params(parameter_in = Query))]
-pub struct PaginationParams {
-    /// The number of items to skip before returning results.
-    pub skip: i64,
-    /// The number of items per page (-1 for no limit).
-    pub nbr: i64,
-    /// The column used for sorting the results.
-    pub sort_key: UserSortKey,
-    /// The sorting order (`Asc` or `Desc`).
-    pub sort: SortOrder,
-    /// An optional search term to filter results.
-    pub searched_value: Option<String>,
-}
+/// Pagination parameters for user queries: the crate-wide generic
+/// pagination model instantiated with the typed user sort key, so the
+/// sort column comes from `UserSortKey` itself instead of a free-form
+/// string.
+pub type PaginationParams = crate::db::primary::models::PaginationParams<UserSortKey>;
+
+// Behavioral tests for the user data models live in their own directory
+// next to the source file, per the project test layout rule.
+#[cfg(test)]
+mod tests;

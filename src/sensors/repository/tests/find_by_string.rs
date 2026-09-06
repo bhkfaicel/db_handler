@@ -1,11 +1,8 @@
 use crate::{
     db::connection::Connection,
-    db::primary::{
-        models::{PaginationParams, SortOrder},
-        repository::PrimaryDbRepository,
-    },
+    db::primary::{models::SortOrder, repository::PrimaryDbRepository},
     sensors::{
-        model::{Sensor, Status},
+        model::{PaginationParams, Sensor, SensorSortKey, Status},
         repository::SensorRepository,
     },
 };
@@ -30,7 +27,7 @@ async fn should_return_sensors() -> Result<()> {
     let pagination_params = PaginationParams {
         skip: 0,
         nbr: -1,
-        sort_key: "id".to_string(),
+        sort_key: SensorSortKey::Id,
         sort: SortOrder::Asc,
         searched_value: None,
     };

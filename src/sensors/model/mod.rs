@@ -1,13 +1,10 @@
 #[cfg(feature = "utoipaDoc")]
-use utoipa::{IntoParams, ToSchema};
+use utoipa::ToSchema;
 
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::{
-    db::primary::models::SortOrder, drives::columns::HasColumns,
-    sensors::contact::model::ContactSensor,
-};
+use crate::{drives::columns::HasColumns, sensors::contact::model::ContactSensor};
 use db_derive::HasColumns;
 
 /// Data for recording sensor history.
@@ -208,10 +205,9 @@ pub enum TypedSensor {
 impl TypedSensor {
     /// Creates a `TypedSensor` from a `Sensor` based on its type.
     ///
-    /// This method uses helper functions that force each sensor type to implement
-    /// the `HistoryCapable` trait. If a new sensor type is added, the compiler will
-    /// force the developer to create a corresponding helper function and implement
-    /// the trait.
+    /// The conversion matches exhaustively on `ProductType`, so adding a new
+    /// sensor type is a compile error until a matching helper function (and
+    /// the typed model behind it) exists.
     ///
     /// # Arguments
     ///
@@ -229,8 +225,9 @@ impl TypedSensor {
 
     /// Helper function to create a `ContactSensor` from a `Sensor`.
     ///
-    /// This function forces `ContactSensor` to implement `HistoryCapable`.
-    /// If the trait is not implemented, the code will not compile.
+    /// Wraps the raw sensor in its typed representation; `ContactSensor`
+    /// implements `TypedSensorTrait`, which the `TypedSensor` accessors
+    /// delegate to.
     ///
     /// # Arguments
     ///
@@ -308,21 +305,11 @@ impl std::fmt::Display for SensorSortKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipaDoc", derive(IntoParams, ToSchema))]
-#[cfg_attr(feature = "utoipaDoc", into_params(parameter_in = Query))]
-pub struct PaginationParams {
-    /// The number of items to skip before returning results.
-    pub skip: i64,
-    /// The number of items per page (-1 for no limit).
-    pub nbr: i64,
-    /// The column used for sorting the results.
-    pub sort_key: SensorSortKey,
-    /// The sorting order (`Asc` or `Desc`).
-    pub sort: SortOrder,
-    /// An optional search term to filter results.
-    pub searched_value: Option<String>,
-}
+/// Pagination parameters for sensor queries: the crate-wide generic
+/// pagination model instantiated with the typed sensor sort key, so the
+/// sort column comes from `SensorSortKey` itself instead of a free-form
+/// string.
+pub type PaginationParams = crate::db::primary::models::PaginationParams<SensorSortKey>;
 
 #[cfg(test)]
 pub mod tests;

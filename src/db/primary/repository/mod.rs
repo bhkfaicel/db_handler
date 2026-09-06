@@ -1,42 +1,44 @@
+// Every item in this module serves the domain repositories, which only
+// exist under the `sensors` or `users` features, so the imports are gated
+// with the same condition: in a core-only build the module is empty and
+// must not raise unused-import warnings.
+#[cfg(any(feature = "sensors", feature = "users"))]
 use crate::{
     db::primary::models::{PaginatedResponse, PaginationParams, SortOrder},
     drives::columns::HasColumns,
 };
-use sqlx::{FromRow, Pool, Row, Sqlite, SqlitePool};
-use std::collections::HashMap;
+#[cfg(any(feature = "sensors", feature = "users"))]
+use serde::Serialize;
+#[cfg(any(feature = "sensors", feature = "users"))]
+use sqlx::{FromRow, Pool, Sqlite, SqlitePool};
+#[cfg(any(feature = "sensors", feature = "users"))]
+use std::fmt::Display;
+#[cfg(any(feature = "sensors", feature = "users"))]
 use std::sync::Arc;
 
-async fn get_table_columns(
-    pool: &Pool<Sqlite>,
-    table_name: &str,
-) -> Result<HashMap<String, String>, sqlx::Error> {
-    let query = format!("PRAGMA table_info({})", table_name);
-    let rows = sqlx::query(&query).fetch_all(pool).await?;
-
-    let mut columns = HashMap::new();
-
-    for row in rows {
-        let name: String = row.get("name");
-        let col_type: String = row.get("type");
-        columns.insert(name, col_type);
-    }
-
-    Ok(columns)
-}
-
-pub(crate) async fn get_paginated_results_by_string<T>(
+// The pagination infrastructure exists solely for the domain repositories,
+// which are only compiled under the `sensors` or `users` features, so it is
+// gated the same way: without a gate the core-only build reports it as dead
+// code.
+#[cfg(any(feature = "sensors", feature = "users"))]
+pub(crate) async fn get_paginated_results_by_string<T, K>(
     pool: &Pool<Sqlite>,
     table: &str,
-    pagination: &PaginationParams,
+    pagination: &PaginationParams<K>,
 ) -> Result<PaginatedResponse<T>, anyhow::Error>
 where
     T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + HasColumns + Unpin + 'static,
+    K: AsRef<str> + Display + Serialize,
 {
+    // The model's column map, generated at compile time by `db_derive`, is
+    // the single source of truth for the table columns: the schema is fixed
+    // once the boot migrations have run, so the in-memory map is authoritative
+    // and no per-call `PRAGMA table_info` round-trip is needed.
     let map = T::column_map();
-    let column_to_return: Vec<String> = map
-        .keys()
-        .map(|k| k.trim_start_matches("r#").to_string())
-        .collect();
+    // Sorted so the generated SELECT column list is deterministic instead of
+    // depending on `HashMap` iteration order.
+    let mut column_to_return: Vec<String> = map.keys().cloned().collect();
+    column_to_return.sort();
     let string_columns: Vec<String> = map
         .iter()
         .filter(|(_, col_type)| col_type.to_lowercase() == "string")
@@ -45,17 +47,10 @@ where
     if string_columns.is_empty() {
         return Err(anyhow::anyhow!("No string columns found"));
     }
-    // Verify that the `sort_key` is valid
-    let db_map = get_table_columns(pool, table).await?;
-    let columns: Vec<String> = db_map.keys().cloned().collect();
-    // if !columns.contains(&(pagination.sort_key.as_ref()).to_string()) {
-    //     return Err(anyhow::anyhow!(
-    //         "Invalid sort key `{}` for table `{}`",
-    //         pagination.sort_key,
-    //         table
-    //     ));
-    // }
-    if !columns.contains(&(pagination.sort_key).to_string()) {
+    // The sort key is validated against the same in-memory map (same fixed
+    // schema assumption): a column absent from the model's column map can
+    // never name a sortable column of the table.
+    if !map.keys().any(|col| col == pagination.sort_key.as_ref()) {
         return Err(anyhow::anyhow!(
             "Invalid sort key `{}` for table `{}`",
             pagination.sort_key,
@@ -86,7 +81,7 @@ where
         Some(value) => {
             let mut count_query_sql = sqlx::query_scalar::<_, i64>(&count_query);
             for _ in &string_columns {
-                count_query_sql = count_query_sql.bind(format!("%{}%", value)); // 🔥 bind pour chaque colonne
+                count_query_sql = count_query_sql.bind(format!("%{}%", value)); // one binding per string column
             }
             count_query_sql.fetch_one(pool).await?
         }
@@ -102,7 +97,7 @@ where
         column_to_return.join(", "),
         table,
         search_filter,
-        pagination.sort_key,
+        pagination.sort_key.as_ref(),
         sort_order
     );
     let mut sql_query = sqlx::query_as::<_, T>(&query);
@@ -121,6 +116,11 @@ where
     })
 }
 
+// The pagination infrastructure exists solely for the domain repositories
+// (only compiled under the `sensors` or `users` features), so the trait is
+// gated the same way; every repository implementation lives inside those
+// gated domains.
+#[cfg(any(feature = "sensors", feature = "users"))]
 pub(crate) trait PrimaryDbRepository: Sized {
     /// Creates a new instance of the repository with a SQLite connection pool.
     ///
@@ -135,4 +135,8 @@ pub(crate) trait PrimaryDbRepository: Sized {
 }
 
 #[cfg(test)]
+// The repository tests exercise the pagination infrastructure, which only
+// exists under the `sensors` or `users` features, so the module carries
+// the same gate: both conditions must hold for it to compile.
+#[cfg(any(feature = "sensors", feature = "users"))]
 mod tests;

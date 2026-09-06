@@ -23,4 +23,4 @@ greenfield deployments.
 ## Tests
 
 - `src/sensors/repository/tests/delete_cascades_children.rs` — delete by MAC/id purges child rows.
-- `src/db/primary/tests.rs::migrations_apply_exactly_once_across_boots` — ledger prevents replay.
+- `src/db/primary/tests/mod.rs::migrations_apply_exactly_once_across_boots` — ledger prevents replay.

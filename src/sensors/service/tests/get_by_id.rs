@@ -35,7 +35,7 @@ async fn shulde_return_none() -> Result<()> {
         .add("00:1B:44:11:3A:B8")
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    id = id + 1;
+    id += 1;
     let retrieved_sensor = service
         .get_by_id(id)
         .await

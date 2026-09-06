@@ -10,9 +10,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install cargo-nextest (version compatible with Rust 1.91)
-RUN cargo install cargo-nextest --version 0.9.99 --locked
-
 # Forgejo registry for db_derive crate (pass CARGO_REGISTRIES_FORGEJO_TOKEN at build time, e.g. via .env)
 # Use a dedicated CARGO_HOME so our config is found (slim image may use /usr/local/cargo)
 ARG CARGO_REGISTRIES_FORGEJO_TOKEN
@@ -52,5 +49,7 @@ RUN mkdir -p /app/db_handler/data
 ENV RUST_BACKTRACE=1
 ENV SQLX_OFFLINE=true
 
-# Default command (can be overridden)
-CMD ["cargo", "test", "--features", "sensors,utoipaDoc,users"]
+# Default command: the same gate as local CI (scripts/test.sh); Docker
+# overrides CONFIG_FILE and adds the InfluxDB-backed ignored-test pass via
+# docker-compose.test.yml
+CMD ["bash", "scripts/test.sh"]

@@ -20,3 +20,8 @@ pub struct HistoricalKey {
     /// UTC timestamp at which the key becomes invalid.
     pub expire_at: DateTime<Utc>,
 }
+
+// Behavioral tests for the historical key data model live in their own
+// directory next to the source file, per the project test layout rule.
+#[cfg(test)]
+mod tests;

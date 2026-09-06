@@ -16,9 +16,14 @@ use std::{env, fs::File, io::BufReader};
 ///   "primary_db_url": "sqlite:/path/to/home_iot.db",
 ///   "history_db_url": "http://localhost:8086",
 ///   "history_db_org": "my-org",
-///   "history_db_token": "my-secret-token"
+///   "history_db_token": "my-secret-token",
+///   "bucket_name": "my-bucket"
 /// }
 /// ```
+///
+/// `bucket_name` is optional: when the field is absent the
+/// [`default_bucket_name`] value applies, so existing configuration files
+/// stay valid without any edit.
 ///
 /// Only the fields defined in this struct are read from the JSON file.
 #[derive(Debug, Deserialize)]
@@ -27,6 +32,17 @@ pub struct HomeIotConfig {
     history_db_url: String,
     history_db_org: String,
     history_db_token: String,
+    /// Name of the InfluxDB bucket that history writes target.
+    #[serde(default = "default_bucket_name")]
+    bucket_name: String,
+}
+
+/// Default InfluxDB bucket used when a configuration file omits
+/// `bucket_name`: pre-existing deployments keep working unchanged and the
+/// value can be renamed per deployment through the configuration file
+/// instead of in code.
+fn default_bucket_name() -> String {
+    "test_bucket".to_string()
 }
 
 impl HomeIotConfig {
@@ -92,5 +108,10 @@ impl HomeIotConfig {
     /// Returns the authentication token for the time-series/history database.
     pub fn history_db_token(&self) -> String {
         self.history_db_token.clone()
+    }
+
+    /// Returns the InfluxDB bucket name that history writes target.
+    pub fn bucket_name(&self) -> String {
+        self.bucket_name.clone()
     }
 }

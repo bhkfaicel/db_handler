@@ -19,3 +19,8 @@ pub struct Nonce {
     /// sensor mac.
     pub mac: String,
 }
+
+// Behavioral tests for the nonce data model live in their own directory
+// next to the source file, per the project test layout rule.
+#[cfg(test)]
+mod tests;

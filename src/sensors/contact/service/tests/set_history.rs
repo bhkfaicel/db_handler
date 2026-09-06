@@ -131,9 +131,47 @@ async fn should_record_history_with_vibration_count() -> Result<()> {
     assert_eq!(
         updated_sensor.is_open(),
         Some(false),
-        "is_open should be updated to false in primary database"
+        "is_open should be updated to false in primary database after state change"
     );
     Ok(())
+}
+
+/// A missing `sensors` row makes the `update_by_mac` upsert fail with a
+/// foreign-key violation: a real database failure. The service must surface
+/// it as `ContactSensorError::Common(CommonError::Database)`, never as
+/// `NotFound`. The failure short-circuits before any InfluxDB call, so this
+/// test only needs the primary database and runs in the standard suite.
+#[tokio::test]
+async fn should_propagate_database_failure_instead_of_not_found() -> anyhow::Result<()> {
+    use crate::db::primary::error::CommonError;
+    use crate::sensors::contact::error::ContactSensorError;
+    use crate::sensors::contact::model::ContactSensor;
+    use crate::sensors::model::Sensor;
+
+    let connection = Connection::new().await?;
+    let service = ContactSensorService::new(connection);
+
+    // Sensor ID absent from the `sensors` table: the INSERT in
+    // `update_by_mac` violates its foreign key (a database failure), it is
+    // not a lookup miss.
+    let ghost = ContactSensor::new(
+        Sensor::new(999_999, "FF:FF:44:11:3A:FF".to_string(), Status::Installed),
+        None,
+        None,
+    );
+
+    let result = service.set_history(&ghost, true, None, None).await;
+    match result {
+        // A real database failure surfaces through the Common wrapper.
+        Err(ContactSensorError::Common(CommonError::Database(_))) => Ok(()),
+        Err(other) => Err(anyhow::anyhow!(
+            "Expected Common(Database), got {:?}",
+            other
+        )),
+        Ok(()) => Err(anyhow::anyhow!(
+            "Database failure must not silently succeed"
+        )),
+    }
 }
 
 #[tokio::test]

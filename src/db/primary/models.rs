@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 #[cfg(feature = "utoipaDoc")]
 use utoipa::{IntoParams, ToSchema};
 
@@ -13,38 +14,39 @@ pub enum SortOrder {
     Desc = -1,
 }
 
+/// Generic pagination parameters shared by every domain repository.
+///
+/// `K` is the sort-key type. Domains instantiate it with their typed
+/// sort-key enum (`SensorSortKey`, `UserSortKey`), whose `AsRef<str>` /
+/// `Display` implementations render the SQL column name, so no per-domain
+/// copy of this model and no field-by-field conversion at service
+/// boundaries is needed. `String` satisfies the bounds directly for
+/// callers that have no typed key (unit tests, ad-hoc queries).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipaDoc", derive(IntoParams, ToSchema))]
 #[cfg_attr(feature = "utoipaDoc", into_params(parameter_in = Query))]
-pub(crate) struct PaginationParams {
+// The sort key is rendered as its string form (`AsRef<str>`/`Display`),
+// so no utoipa trait bound is imposed on `K`: removing the ToSchema
+// derive auto-bounds lets the schema be generated for any `K` that
+// satisfies the struct's own bounds.
+#[cfg_attr(feature = "utoipaDoc", schema(bound = ""))]
+pub struct PaginationParams<K>
+where
+    K: AsRef<str> + Display + Serialize,
+{
     /// The number of items to skip before returning results.
     pub skip: i64,
     /// The number of items per page (-1 for no limit).
     pub nbr: i64,
     /// The column used for sorting the results.
-    pub sort_key: String,
+    #[cfg_attr(feature = "utoipaDoc", schema(value_type = String))]
+    #[cfg_attr(feature = "utoipaDoc", param(value_type = String))]
+    pub sort_key: K,
     /// The sorting order (`Asc` or `Desc`).
     pub sort: SortOrder,
     /// An optional search term to filter results.
     pub searched_value: Option<String>,
 }
-
-// pub struct PaginationParams<Key>
-// where
-//     Key: AsRef<str> + Display + Serialize,
-// {
-//     /// The number of items to skip before returning results.
-//     pub skip: i64,
-//     /// The number of items per page (-1 for no limit).
-//     pub nbr: i64,
-//     /// The column used for sorting the results.
-//     #[cfg_attr(feature = "utoipaDoc", schema(value_type = String))]
-//     pub sort_key: Key,
-//     /// The sorting order (`Asc` or `Desc`).
-//     pub sort: SortOrder,
-//     /// An optional search term to filter results.
-//     pub searched_value: Option<String>,
-// }
 
 /// Represents the paginated response.
 ///

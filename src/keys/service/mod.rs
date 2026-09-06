@@ -3,7 +3,6 @@ use log::warn;
 use std::sync::Arc;
 
 use crate::db::connection::Connection;
-use crate::db::primary::error::CommonError;
 use crate::db::primary::repository::PrimaryDbRepository;
 use crate::db::primary::service::{map_sqlx_to_common_error, Service};
 use crate::history::keys::service::HistoricalKeyService;
@@ -16,7 +15,10 @@ use crate::keys::{
 /// Helper function to convert `sqlx::Error` to `KeyError`.
 ///
 /// This function uses the centralized `map_sqlx_to_common_error` function
-/// to convert database errors to `KeyError`.
+/// to convert database errors to `KeyError`. Repository results already
+/// carry `CommonError` and convert to `KeyError` with `?`; this helper
+/// remains only for the raw sqlx errors surfaced by transaction
+/// `begin`/`commit` on the connection pool.
 fn map_sqlx_error(e: sqlx::Error) -> KeyError {
     map_sqlx_to_common_error(e).into()
 }
@@ -89,23 +91,17 @@ impl KeyService {
             mac: mac.to_string(),
         };
 
-        // Try to delete existing key for this MAC (it's expected if none exists)
-        // Log but don't fail if deletion fails
-        if let Err(e) = self
-            .repository
+        // Delete any previous key for this MAC. The absence of a previous
+        // key is `Ok` (zero rows deleted), so every `Err` is a real failure
+        // that must abort the transaction instead of being logged and
+        // ignored.
+        self.repository
             .delete_by_mac_with_transaction(&mut tx, mac)
-            .await
-        {
-            warn!(
-                "Failed to delete existing key for MAC {} (this is expected if no key exists): {}",
-                mac, e
-            );
-        }
+            .await?;
 
-        // Insert the new key within transaction
-        let insert_result = self.repository.insert_with_transaction(&mut tx, &key).await;
-
-        let id = match insert_result {
+        // Insert the new key within transaction; the repository already
+        // reports failures as `CommonError` (unique violations included).
+        let id = match self.repository.insert_with_transaction(&mut tx, &key).await {
             Ok(id) => id,
             Err(e) => {
                 if let Err(rollback_err) = tx.rollback().await {
@@ -114,14 +110,12 @@ impl KeyService {
                         rollback_err
                     );
                 }
-                return Err(KeyError::Common(CommonError::Database(e)));
+                return Err(e.into());
             }
         };
 
         // Commit the transaction
-        if let Err(e) = tx.commit().await {
-            return Err(KeyError::Common(CommonError::Database(e)));
-        }
+        tx.commit().await.map_err(map_sqlx_error)?;
 
         key.id = id;
         Ok(key)
@@ -154,10 +148,11 @@ impl KeyService {
     ///  }
     /// ```
     pub async fn get_by_mac(&self, mac: &str) -> Result<Key> {
+        // The repository already reports errors as `CommonError`, which
+        // converts into `KeyError::Common` through the `?` operator.
         self.repository
             .get_by_mac(mac)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .ok_or_else(|| KeyError::not_found(mac))
     }
 
@@ -183,7 +178,9 @@ impl KeyService {
     ///  }
     /// ```
     pub async fn get_all(&self) -> Result<Vec<Key>> {
-        self.repository.get_all().await.map_err(map_sqlx_error)
+        // The repository already reports errors as `CommonError`, which
+        // converts into `KeyError::Common` through the `?` operator.
+        Ok(self.repository.get_all().await?)
     }
 }
 #[cfg(test)]

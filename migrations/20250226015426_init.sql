@@ -1,11 +1,11 @@
--- Table des users
+-- Users table
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL
 );
--- Table des capteurs
+-- Sensors table
 CREATE TABLE IF NOT EXISTS sensors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sensor_type TEXT,
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS sensors (
     status TEXT NOT NULL
 );
 
--- Table des données spécifiques aux capteurs
+-- Sensor-specific data
 CREATE TABLE IF NOT EXISTS open_close_sensors (
     sensor_id INTEGER,
     sensor_mac TEXT NOT NULL,

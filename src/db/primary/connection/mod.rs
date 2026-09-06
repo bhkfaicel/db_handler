@@ -17,13 +17,13 @@ use std::{
 ///
 /// # Environment Variables
 ///
-/// * `CONFIG_FILE` – Path to a JSON file containing a `db_url` field.
+/// * `CONFIG_FILE` – Path to a JSON file containing a `primary_db_url` field.
 ///
 /// # Behavior
 ///
-/// - If `db_url == ":memory:"`, opens an in-memory database with shared cache
+/// - If `primary_db_url == ":memory:"`, opens an in-memory database with shared cache
 ///   (`file::memory:?cache=shared`) and uses `MEMORY` journal mode.
-/// - Otherwise, opens (or creates) the file at `db_url` with foreign keys enabled
+/// - Otherwise, opens (or creates) the file at `primary_db_url` with foreign keys enabled
 ///   and shared cache.
 ///
 /// # Returns
@@ -93,7 +93,12 @@ pub(crate) async fn get_primary_db_client() -> Result<SqlitePool> {
             .create_if_missing(true)
             .foreign_keys(true)
             .shared_cache(true)
-            .pragma("key", "test")
+        // No at-rest encryption pragma here: no SQLCipher backend exists in
+        // the dependency graph, so an encryption pragma would be a silent
+        // no-op and a configured key a false guarantee. At-rest protection
+        // of the SQLite file (file permissions, system-level encryption)
+        // is the deployer's responsibility; see the configuration section
+        // of the README.
     };
 
     let pool = SqlitePoolOptions::new()
@@ -154,7 +159,9 @@ pub(crate) async fn get_primary_db_client() -> Result<SqlitePool> {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        println!("migration {name} applied");
+        // Library code logs instead of printing: the application decides
+        // where migration progress output goes.
+        log::info!("migration {name} applied");
     }
     Ok(pool)
 }

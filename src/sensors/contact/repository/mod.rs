@@ -1,16 +1,23 @@
 use crate::{
-    db::primary::repository::PrimaryDbRepository,
+    db::primary::{
+        error::{CommonError, Result},
+        repository::PrimaryDbRepository,
+        service::map_sqlx_to_common_error,
+    },
     sensors::{
         contact::model::ContactSensor,
         model::{Sensor, Status},
     },
 };
-use anyhow::Result;
 use sqlx::types::chrono::NaiveDateTime;
 use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// Repository for contact-sensor rows in the primary database.
+///
+/// Methods return `CommonError` (converted at the single central point), so
+/// the service never needs to inspect raw sqlx or anyhow error payloads.
 pub(crate) struct ContactSensorRepository {
     pool: Arc<SqlitePool>,
 }
@@ -51,11 +58,12 @@ impl ContactSensorRepository {
             id
         )
         .fetch_optional(&*self.pool)
-        .await?;
+        .await
+        .map_err(map_sqlx_to_common_error)?;
 
         if let Some(record) = result {
             let status = Status::from_str(&record.status)
-                .map_err(|_| anyhow::anyhow!("Invalid status value"))?;
+                .map_err(|_| CommonError::Operation("Invalid status value".to_string()))?;
             // Handle Option<Option<i32>> from LEFT JOIN (get_by_id)
             let is_open = Self::convert_is_open_nested(record.is_open);
             // Handle Option<Option<NaiveDateTime>> from LEFT JOIN (get_by_id)
@@ -83,15 +91,16 @@ impl ContactSensorRepository {
             mac
         )
         .fetch_optional(&*self.pool)
-        .await?;
+        .await
+        .map_err(map_sqlx_to_common_error)?;
 
         if let Some(record) = result {
             let status = Status::from_str(&record.status)
-                .map_err(|_| anyhow::anyhow!("Invalid status value"))?;
+                .map_err(|_| CommonError::Operation("Invalid status value".to_string()))?;
             let id = record
                 .id
-                .map(|id| id as u32)
-                .ok_or_else(|| anyhow::anyhow!("ID is null"))?;
+                .ok_or_else(|| CommonError::Operation("ID is null".to_string()))?
+                as u32;
             // Handle Option<i32> from LEFT JOIN (get_by_mac)
             let is_open = Self::convert_is_open_simple(record.is_open);
             // Handle Option<NaiveDateTime> from LEFT JOIN (get_by_mac)
@@ -116,14 +125,15 @@ impl ContactSensorRepository {
     /// # Returns
     ///
     /// * `Ok(u32)` - The number of rows updated
-    /// * `Err(sqlx::Error)` - If an error occurs during the update
+    /// * `Err(CommonError)` - If an error occurs during the update (e.g. the
+    ///   referenced sensor does not exist: foreign-key violation)
     pub async fn update_by_mac(
         &self,
         id: u32,
         mac: &str,
         is_open: bool,
         updated_at: NaiveDateTime,
-    ) -> Result<u32, sqlx::Error> {
+    ) -> Result<u32> {
         let is_open_int = if is_open { 1 } else { 0 };
 
         let result = sqlx::query!(
@@ -140,7 +150,8 @@ impl ContactSensorRepository {
             updated_at
         )
         .execute(&*self.pool)
-        .await?;
+        .await
+        .map_err(map_sqlx_to_common_error)?;
         Ok(result.rows_affected() as u32)
     }
 }

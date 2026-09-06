@@ -1,6 +1,7 @@
 use crate::{
     db::{connection::Connection, primary::service::Service},
     sensors::{
+        error::SensorError,
         model::{ProductType, Status, TypedSensor},
         service::SensorService,
     },
@@ -75,7 +76,12 @@ async fn should_return_error_no_fields() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let updated_sensors_result = service.update_by_mac("00:1B:44:11:3A:B9", None, None).await;
-    assert!(updated_sensors_result.is_err());
+    // Typed non-regression assertion: an empty update is rejected with the
+    // dedicated variant before any SQL is sent.
+    assert!(matches!(
+        updated_sensors_result,
+        Err(SensorError::NoFieldsForUpdate)
+    ));
     let retrieved_sensor = service
         .get_by_id(id)
         .await
@@ -102,7 +108,12 @@ async fn should_return_error_type_is_in_progress() -> Result<()> {
             Some(ProductType::ContactSensor),
         )
         .await;
-    assert!(updated_sensors_result.is_err());
+    // Typed non-regression assertion: reverting a status to `InProgress` is
+    // rejected with the dedicated variant before any SQL is sent.
+    assert!(matches!(
+        updated_sensors_result,
+        Err(SensorError::CannotUpdateToInProgress)
+    ));
     let retrieved_sensor = service
         .get_by_id(id)
         .await

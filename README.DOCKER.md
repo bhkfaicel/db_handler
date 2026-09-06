@@ -109,10 +109,8 @@ Docker volumes are used for:
 
 The following environment variables are defined in `docker-compose.test.yml`:
 
-- `CONFIG_FILE=/app/config.test.json`
-- `TIMESERIES_DB_URL=http://influxdb:8086`
-- `TIMESERIES_DB_ORG=test-org`
-- `TIMESERIES_DB_TOKEN=test-token-...`
+- `CONFIG_FILE=/app/db_handler/config.test.json` (JSON configuration: SQLite URL, InfluxDB URL/org/token)
+- `RUST_BACKTRACE=1`
 - `SQLX_OFFLINE=true`
 
 ## 🎯 Benefits

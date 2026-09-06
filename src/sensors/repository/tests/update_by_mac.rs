@@ -82,7 +82,7 @@ async fn should_update_only_type() -> Result<()> {
     let id = repository.insert(&sensor).await?;
     let _ = repository
         .update_by_mac("00:1B:44:11:3A:B7", None, Some(ProductType::ContactSensor))
-        .await;
+        .await?;
     let updated_sensor = sqlx::query_as::<_, Sensor>(
         r#"
         SELECT * FROM sensors WHERE id = ?
@@ -103,61 +103,9 @@ async fn should_update_only_type() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn shouldnt_update_status_and_type_because_status_is_in_progress() -> Result<()> {
-    let connection = Connection::new().await?;
-    let pool = connection.primary_db_client().clone();
-    let repository = SensorRepository::new(pool.clone());
-    let sensor = Sensor::new(0, "00:1B:44:11:3A:B7".to_string(), Status::Installed);
-    let id = repository.insert(&sensor).await?;
-    let affected_rows = repository
-        .update_by_mac(
-            "00:1B:44:11:3A:B7",
-            Some(Status::InProgress),
-            Some(ProductType::ContactSensor),
-        )
-        .await;
-    assert!(affected_rows.is_err());
-    let updated_sensor = sqlx::query_as::<_, Sensor>(
-        r#"
-        SELECT * FROM sensors WHERE id = ?
-        "#,
-    )
-    .bind(id)
-    .fetch_one(&*pool)
-    .await
-    .expect("Failed to fetch created sensor");
-    assert_eq!(updated_sensor.id, id);
-    assert_eq!(updated_sensor.mac, "00:1B:44:11:3A:B7".to_string());
-    assert_eq!(updated_sensor.status, Status::Installed);
-    assert!(updated_sensor.sensor_type.is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn should_return_error_because_all_fields_are_none() -> Result<()> {
-    let connection = Connection::new().await?;
-    let pool = connection.primary_db_client().clone();
-    let repository = SensorRepository::new(pool.clone());
-    let sensor = Sensor::new(0, "00:1B:44:11:3A:B7".to_string(), Status::InProgress);
-    let id = repository.insert(&sensor).await?;
-    let affected_rows = repository
-        .update_by_mac("00:1B:44:11:3A:B7", None, None)
-        .await;
-    assert!(affected_rows.is_err());
-    let updated_sensor = sqlx::query_as::<_, Sensor>(
-        r#"
-        SELECT * FROM sensors WHERE id = ?
-        "#,
-    )
-    .bind(id)
-    .fetch_one(&*pool)
-    .await
-    .expect("Failed to fetch created sensor");
-    println!("{:?}", updated_sensor);
-    assert_eq!(updated_sensor.id, id);
-    assert_eq!(updated_sensor.mac, "00:1B:44:11:3A:B7".to_string());
-    assert_eq!(updated_sensor.status, Status::InProgress);
-    assert!(updated_sensor.sensor_type.is_none());
-    Ok(())
-}
+// NOTE: the business rules (no update to `InProgress`, at least one field
+// required) moved out of the repository into `SensorService`, which rejects
+// them before any SQL is sent. Their non-regression coverage lives in the
+// service tests (`src/sensors/service/tests/update_by_mac.rs`) with typed
+// `SensorError` variant assertions, replacing the two former
+// message-less `is_err()` repository tests.

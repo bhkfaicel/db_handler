@@ -2,23 +2,25 @@ use crate::{db::connection::Connection, db::primary::error::CommonError};
 
 /// Converts a `sqlx::Error` to a `CommonError`.
 ///
-/// This helper function centralizes the conversion of SQLx errors to common errors.
-/// It can be used by all services to convert database errors before converting them
-/// to service-specific error types.
+/// This helper function is the crate's single conversion point from SQLx
+/// errors to common errors. It delegates to `CommonError::from_sqlx`, so
+/// unique violations are decoded into the structured
+/// `CommonError::UniqueViolation` variant exactly once, here, and services
+/// never need to sniff error messages themselves.
 ///
 /// # Example
 ///
 /// ```rust
 /// use db_handler::db::primary::service::map_sqlx_to_common_error;
-/// use db_handler::refresh_token::error::RefreshTokenError;
+/// use db_handler::db::primary::error::CommonError;
 ///
-/// // Convert sqlx::Error → CommonError → RefreshTokenError
-/// let sqlx_err = sqlx::Error::PoolClosed;
-/// let common_err = map_sqlx_to_common_error(sqlx_err);
-/// let refresh_token_err: RefreshTokenError = common_err.into();
+/// // sqlx::Error -> CommonError; mapping the result onto a domain error is
+/// // the caller's business.
+/// let common_err = map_sqlx_to_common_error(sqlx::Error::PoolClosed);
+/// assert!(matches!(common_err, CommonError::Database(_)));
 /// ```
 pub fn map_sqlx_to_common_error(e: sqlx::Error) -> CommonError {
-    e.into()
+    CommonError::from_sqlx(e)
 }
 
 /// Base trait for all services in the application.
@@ -29,14 +31,18 @@ pub fn map_sqlx_to_common_error(e: sqlx::Error) -> CommonError {
 ///
 /// # Example
 ///
+/// The examples below use `UserService`, which only exists under the
+/// `users` feature, so each example is compiled and run only when that
+/// feature is enabled (the `#[cfg]` guards keep the doc tests green in a
+/// core-only build too).
+///
 /// ```rust
-/// // Option 1: Use the prelude (recommended)
+/// # #[cfg(feature = "users")]
+/// # mod prelude_example {
+/// // Option 1: use the prelude (recommended)
 /// use db_handler::prelude::*;
-/// use db_handler::refresh_token::service::RefreshTokenService;
 /// use db_handler::users::service::UserService;
 /// use db_handler::db::connection::Connection;
-/// use sqlx::SqlitePool;
-/// use std::sync::Arc;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // All services implement the Service trait
@@ -44,7 +50,6 @@ pub fn map_sqlx_to_common_error(e: sqlx::Error) -> CommonError {
 ///
 /// // Uniform service creation via the trait
 /// let user_service = UserService::new(connection.clone());
-/// let refresh_token_service = RefreshTokenService::new(connection.clone());
 ///
 /// // Generic function that accepts any service
 /// fn create_service<T: Service>(connection: Connection) -> T {
@@ -52,21 +57,26 @@ pub fn map_sqlx_to_common_error(e: sqlx::Error) -> CommonError {
 /// }
 ///
 /// let user_service2: UserService = create_service(connection);
+/// # let _ = (user_service, user_service2);
 /// # Ok(())
+/// # }
 /// # }
 /// ```
 ///
 /// ```rust
-/// // Option 2: Explicitly import the trait
+/// # #[cfg(feature = "users")]
+/// # mod explicit_example {
+/// // Option 2: explicitly import the trait
 /// use db_handler::db::primary::service::Service;
 /// use db_handler::users::service::UserService;
 /// use db_handler::db::connection::Connection;
-/// use sqlx::SqlitePool;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let connection = Connection::new().await?;
 /// let service = UserService::new(connection);
+/// # let _ = service;
 /// # Ok(())
+/// # }
 /// # }
 /// ```
 pub trait Service: Sized {

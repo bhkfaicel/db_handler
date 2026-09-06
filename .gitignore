@@ -36,4 +36,3 @@ plan/
 # OS files
 .DS_Store
 Thumbs.db
-tests1/*

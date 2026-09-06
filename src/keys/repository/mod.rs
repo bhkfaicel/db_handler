@@ -1,8 +1,16 @@
-use crate::{db::primary::repository::PrimaryDbRepository, keys::model::Key};
+use crate::db::primary::error::Result;
+use crate::db::primary::repository::PrimaryDbRepository;
+use crate::db::primary::service::map_sqlx_to_common_error;
+use crate::keys::model::Key;
 use chrono::{DateTime, Utc};
 use sqlx::{SqlitePool, Transaction};
 use std::sync::Arc;
 /// Repository for performing CRUD operations on `Keys` entities.
+///
+/// All methods return `CommonError`: raw sqlx errors are converted by the
+/// single central conversion point, so unique violations surface as the
+/// structured `CommonError::UniqueViolation` variant instead of requiring
+/// callers to inspect error messages.
 pub(crate) struct KeyRepository {
     pool: Arc<SqlitePool>,
 }
@@ -17,7 +25,7 @@ impl KeyRepository {
         &self,
         tx: &mut Transaction<'_, sqlx::Sqlite>,
         key: &Key,
-    ) -> Result<u32, sqlx::Error> {
+    ) -> Result<u32> {
         let value = key.value.to_vec();
         let result = sqlx::query!(
             "INSERT INTO keys (value, expire_at,mac) VALUES (?, ?,?)",
@@ -26,7 +34,8 @@ impl KeyRepository {
             key.mac
         )
         .execute(&mut **tx)
-        .await?;
+        .await
+        .map_err(map_sqlx_to_common_error)?;
         Ok(result.last_insert_rowid() as u32)
     }
 
@@ -35,14 +44,15 @@ impl KeyRepository {
         &self,
         tx: &mut Transaction<'_, sqlx::Sqlite>,
         mac: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<()> {
         sqlx::query!("DELETE FROM keys WHERE mac = ?", mac)
             .execute(&mut **tx)
-            .await?;
+            .await
+            .map_err(map_sqlx_to_common_error)?;
         Ok(())
     }
 
-    pub(crate) async fn get_by_mac(&self, mac: &str) -> Result<Option<Key>, sqlx::Error> {
+    pub(crate) async fn get_by_mac(&self, mac: &str) -> Result<Option<Key>> {
         let now = chrono::Utc::now();
         let result = sqlx::query!(
             "SELECT id, value, expire_at FROM keys WHERE mac = ? AND expire_at > ?",
@@ -50,9 +60,13 @@ impl KeyRepository {
             now
         )
         .fetch_optional(&*self.pool)
-        .await?;
+        .await
+        .map_err(map_sqlx_to_common_error)?;
         if let Some(record) = result {
-            let id = record.id.ok_or_else(|| sqlx::Error::RowNotFound)? as u32;
+            let id = record
+                .id
+                .ok_or_else(|| map_sqlx_to_common_error(sqlx::Error::RowNotFound))?
+                as u32;
             Ok(Some(Key {
                 id,
                 mac: mac.to_string(),
@@ -65,15 +79,16 @@ impl KeyRepository {
     }
 
     /// Get all valid (non-expired) keys.
-    pub(crate) async fn get_all(&self) -> Result<Vec<Key>, sqlx::Error> {
+    pub(crate) async fn get_all(&self) -> Result<Vec<Key>> {
         let now = chrono::Utc::now();
 
-        // Utiliser query_as au lieu de query! pour éviter les problèmes de cache offline
+        // Use query_as instead of query! to avoid offline query-cache issues
         let results: Vec<KeyRow> =
             sqlx::query_as("SELECT id, value, expire_at, mac FROM keys WHERE expire_at > ?")
                 .bind(now)
                 .fetch_all(&*self.pool)
-                .await?;
+                .await
+                .map_err(map_sqlx_to_common_error)?;
 
         let keys = results
             .into_iter()

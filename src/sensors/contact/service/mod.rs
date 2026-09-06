@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::db::history::service::HistoryDbService;
 use crate::db::primary::repository::PrimaryDbRepository;
 use crate::db::primary::service::Service;
 use crate::history::{
@@ -21,7 +20,12 @@ pub struct ContactSensorService {
 impl Service for ContactSensorService {
     fn new(connection: Connection) -> Self {
         let repository = ContactSensorRepository::new(connection.primary_db_client());
-        let history_service = ContactSensorHistoryService::new(connection.history_db_client());
+        // The configured bucket travels with the client down to the
+        // history repository, replacing the former hardcoded bucket name.
+        let history_service = ContactSensorHistoryService::new(
+            connection.history_db_client(),
+            connection.history_db_bucket(),
+        );
         Self {
             primary_repository: Arc::new(repository),
             history_service: Arc::new(history_service),
@@ -30,17 +34,16 @@ impl Service for ContactSensorService {
 }
 impl ContactSensorService {
     pub async fn get_by_id(&self, id: u32) -> Result<Option<ContactSensor>> {
-        self.primary_repository
-            .get_by_id(id)
-            .await
-            .map_err(|_e| ContactSensorError::not_found(id.to_string()))
+        // Attribution rule: the repository reports a missing row as `Ok(None)`
+        // and every `Err` is a real database/operation failure, propagated
+        // unchanged (as `ContactSensorError::Common`) instead of being
+        // misattributed to `NotFound`.
+        Ok(self.primary_repository.get_by_id(id).await?)
     }
 
     pub async fn get_by_mac(&self, mac: &str) -> Result<Option<ContactSensor>> {
-        self.primary_repository
-            .get_by_mac(mac)
-            .await
-            .map_err(|_e| ContactSensorError::not_found(mac))
+        // Same attribution rule as `get_by_id`: only `Ok(None)` means absent.
+        Ok(self.primary_repository.get_by_mac(mac).await?)
     }
 
     /// Records history data for a contact sensor.
@@ -129,15 +132,18 @@ impl ContactSensorService {
                     }
                 }
             }
-            Err(_e) => {
-                let error = ContactSensorError::not_found(sensor.mac().to_string());
+            Err(e) => {
                 log::error!(
                     "ContactSensorService::set_history failed to update_by_mac - sensor_id: {}, sensor_mac: {}, error: {:?}",
                     sensor.id(),
                     sensor.mac(),
-                    error
+                    e
                 );
-                Err(error)
+                // The upsert in `update_by_mac` reports a real database or
+                // operation failure here (an absent row is not an error for
+                // an upsert): propagate it as-is instead of masking it as
+                // `NotFound`.
+                Err(e.into())
             }
         }
     }

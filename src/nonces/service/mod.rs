@@ -2,20 +2,8 @@ use std::sync::Arc;
 
 use crate::db::connection::Connection;
 use crate::db::primary::repository::PrimaryDbRepository;
-use crate::db::primary::service::{map_sqlx_to_common_error, Service};
-use crate::nonces::{
-    error::{NonceError, Result},
-    model::Nonce,
-    repository::NonceRepository,
-};
-
-/// Helper function to convert `sqlx::Error` to `NonceError`.
-///
-/// This function uses the centralized `map_sqlx_to_common_error` function
-/// to convert database errors to `NonceError`.
-fn map_sqlx_error(e: sqlx::Error) -> NonceError {
-    map_sqlx_to_common_error(e).into()
-}
+use crate::db::primary::service::Service;
+use crate::nonces::{error::Result, model::Nonce, repository::NonceRepository};
 
 pub struct NonceService {
     pub(crate) repository: Arc<NonceRepository>,
@@ -39,7 +27,9 @@ impl NonceService {
     /// # Returns
     ///
     /// * `Ok(Key)` - The ID of the newly inserted nonce.
-    /// * `Err(sqlx::Error)` - If an error occurs during insertion.
+    /// * `Err(NonceError)` - If an error occurs during insertion
+    ///   (a duplicate nonce surfaces as `NonceError::Common` wrapping the
+    ///   structured `CommonError::UniqueViolation`).
     ///
     /// # Example
     ///
@@ -67,11 +57,7 @@ impl NonceService {
             value: nonce.to_vec(),
             mac: mac.to_string(),
         };
-        let id = self
-            .repository
-            .insert(&nonce)
-            .await
-            .map_err(map_sqlx_error)?;
+        let id = self.repository.insert(&nonce).await?;
         nonce.id = id;
         Ok(nonce)
     }

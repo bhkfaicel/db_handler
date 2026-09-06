@@ -4,19 +4,10 @@ use std::sync::Arc;
 
 use crate::db::connection::Connection;
 use crate::db::primary::repository::PrimaryDbRepository;
-use crate::db::primary::service::{map_sqlx_to_common_error, Service};
+use crate::db::primary::service::Service;
 use crate::history::keys::{
-    error::{HistoricalKeyError, Result},
-    model::HistoricalKey,
-    repository::HistoricalKeyRepository,
+    error::Result, model::HistoricalKey, repository::HistoricalKeyRepository,
 };
-/// Helper function to convert `sqlx::Error` to `HistoricalKeyError`.
-///
-/// This function uses the centralized `map_sqlx_to_common_error` function
-/// to convert database errors to `HistoricalKeyError`.
-fn map_sqlx_error(e: sqlx::Error) -> HistoricalKeyError {
-    map_sqlx_to_common_error(e).into()
-}
 
 pub struct HistoricalKeyService {
     pub(crate) repository: Arc<HistoricalKeyRepository>,
@@ -39,7 +30,9 @@ impl HistoricalKeyService {
     /// # Returns
     ///
     /// * `Ok(HistoricalKey)` - The newly inserted historical key.
-    /// * `Err(HistoricalKeyError::Common(CommonError::Database(_)))` - If a database error occurs.
+    /// * `Err(HistoricalKeyError)` - If an error occurs during insertion
+    ///   (a duplicate `value` surfaces as `HistoricalKeyError::Common`
+    ///   wrapping the structured `CommonError::UniqueViolation`).
     ///
     /// # Example
     ///
@@ -64,11 +57,7 @@ impl HistoricalKeyService {
             value: key.to_vec(),
             expire_at,
         };
-        let id = self
-            .repository
-            .insert(&historical_key)
-            .await
-            .map_err(map_sqlx_error)?;
+        let id = self.repository.insert(&historical_key).await?;
         historical_key.id = id;
         Ok(historical_key)
     }
@@ -82,7 +71,9 @@ impl HistoricalKeyService {
     /// # Returns
     ///
     /// * `Ok(HistoricalKey)` - The newly inserted historical key.
-    /// * `Err(HistoricalKeyError::Common(CommonError::Database(_)))` - If a database error occurs.
+    /// * `Err(HistoricalKeyError)` - If an error occurs during insertion
+    ///   (a duplicate `value` surfaces as `HistoricalKeyError::Common`
+    ///   wrapping the structured `CommonError::UniqueViolation`).
     ///
     /// # Example
     ///
@@ -117,8 +108,7 @@ impl HistoricalKeyService {
         let id = self
             .repository
             .insert_with_transaction(tx, &historical_key)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await?;
         historical_key.id = id;
         Ok(historical_key)
     }

@@ -72,7 +72,8 @@ The application reads configuration from a JSON file. Set the path via the `CONF
   "primary_db_url": "sqlite:data/home_iot.db",
   "history_db_url": "http://localhost:8086",
   "history_db_org": "my-org",
-  "history_db_token": "your-influxdb-token"
+  "history_db_token": "your-influxdb-token",
+  "bucket_name": "my-bucket"
 }
 ```
 
@@ -80,8 +81,11 @@ The application reads configuration from a JSON file. Set the path via the `CONF
 - `history_db_url`: InfluxDB 2.x URL (e.g. `http://localhost:8086`).
 - `history_db_org`: InfluxDB organization name.
 - `history_db_token`: InfluxDB API token.
+- `bucket_name` (optional): InfluxDB bucket that history writes target. Defaults to `test_bucket`; set it to your production bucket per deployment.
 
 Do not commit real credentials. Use `config.example.json` as a template and keep `config.json` or `config.local.json` local (they are in `.gitignore`).
+
+**At-rest protection of the SQLite database is the deployer's responsibility**: the primary database file is plain SQLite (no encryption backend is bundled). Restrict file permissions (e.g. user-only access to the data directory) and/or rely on system-level encryption (LUKS, FileVault, BitLocker) as appropriate for your deployment.
 
 ## Running tests
 

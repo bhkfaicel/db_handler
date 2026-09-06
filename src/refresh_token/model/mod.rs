@@ -29,3 +29,8 @@ pub struct RefreshToken {
     /// Used flag.
     pub is_used: bool,
 }
+
+// Behavioral tests for the refresh token data model live in their own
+// directory next to the source file, per the project test layout rule.
+#[cfg(test)]
+mod tests;

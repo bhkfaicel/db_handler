@@ -1,6 +1,8 @@
 use crate::{
-    db::connection::Connection,
-    db::primary::repository::PrimaryDbRepository,
+    db::{
+        connection::Connection,
+        primary::{error::CommonError, repository::PrimaryDbRepository},
+    },
     sensors::{
         model::{Sensor, Status},
         repository::SensorRepository,
@@ -51,24 +53,17 @@ async fn should_panic_because_mac_exists() -> Result<()> {
     assert_eq!(created_sensor.mac, "00:1B:44:11:3A:B7".to_string());
     let insert_result = repository.insert(&sensor).await;
     if let Err(err) = insert_result {
-        // Extract the SQLx error from `anyhow::Error`
-        if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>() {
-            if let Some(db_err) = sqlx_err.as_database_error() {
-                let error_message = db_err.message();
-                let error_code = db_err.code().map(|c| c.to_string()).unwrap_or_default();
-                // Verify that it's a UNIQUE constraint violation
-                assert!(
-                    error_message.contains("UNIQUE constraint failed: sensors.mac"),
-                    "UNIQUE constraint failed: sensors.mac got: {}",
-                    error_message
-                );
-                assert_eq!(error_code, "2067");
-            } else {
-                panic!("Unexpected non-database error: {:?}", sqlx_err);
-            }
-        } else {
-            panic!("Unexpected non-SQLx error: {:?}", err);
-        }
+        // The repository reports the duplicate structurally: the central
+        // conversion decodes SQLite's message into the constraint name, so
+        // the assertion targets the typed variant and the exact constraint
+        // SQLite reports for the inline UNIQUE on sensors.mac.
+        assert!(
+            matches!(
+                &err,
+                CommonError::UniqueViolation { constraint } if constraint == "sensors.mac"
+            ),
+            "expected CommonError::UniqueViolation on sensors.mac, got: {err:?}"
+        );
     } else {
         panic!("Expected an error, but insert succeeded");
     }

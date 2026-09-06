@@ -80,3 +80,8 @@ impl TypedSensorTrait for ContactSensor {
         &self.status
     }
 }
+
+// Behavioral tests for the contact sensor model live in their own
+// directory next to the source file, per the project test layout rule.
+#[cfg(test)]
+mod tests;

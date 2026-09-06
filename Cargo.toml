@@ -14,25 +14,19 @@ bcrypt = "0.19.0"
 utoipa = { version = "5.4.0", optional = true }
 serde_json = "1.0.149"
 serde = { version = "1.0.214", features = ["derive"] }
-sqlx = { version = "0.8.6", features = ["sqlite","migrate","chrono","macros","runtime-tokio"] }
+sqlx = { version = "0.8.6", features = ["sqlite","chrono","macros","runtime-tokio"] }
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 log = "0.4.29"
 chrono = {version = "0.4.44", features = ["serde"]}
 tokio = { version = "1.50.0", features = ["rt","macros"] }
-async-trait = "0.1"
 futures = "0.3.32"
 # InfluxDB 2.x client (rustls for lighter, pure-Rust TLS)
 influxdb2 = { version = "0.5", features = ["rustls"], default-features = false }
 db_derive = { version = "1.0.0", registry = "forgejorc" }
-#db_derive = { path = "../derive" }
-
-[dev-dependencies]
-futures = "0.3"
 
 [features]
 default = []
 sensors = []
 users = []
 utoipaDoc = ["utoipa"]
-models = []

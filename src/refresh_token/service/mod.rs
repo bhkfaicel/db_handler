@@ -1,14 +1,9 @@
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
-use sqlx::error::ErrorKind;
-
 use crate::{
     db::connection::Connection,
-    db::primary::{
-        repository::PrimaryDbRepository,
-        service::{map_sqlx_to_common_error, Service},
-    },
+    db::primary::{error::CommonError, repository::PrimaryDbRepository, service::Service},
     refresh_token::{
         error::{RefreshTokenError, Result},
         model::RefreshToken,
@@ -16,26 +11,27 @@ use crate::{
     },
 };
 
-/// Helper function to convert `sqlx::Error` to `RefreshTokenError`.
+/// Constraint name SQLite reports for the inline `UNIQUE` on the
+/// `refresh_tokens.token` column (refresh-tokens migration).
+const REFRESH_TOKENS_TOKEN_CONSTRAINT: &str = "refresh_tokens.token";
+
+/// Maps a structured `CommonError` from the repository to the refresh-token
+/// domain error.
 ///
-/// This function detects UNIQUE constraint violations (e.g., duplicate token) and converts
-/// them to `RefreshTokenError::AlreadyExists`. Other database errors are converted via
-/// the centralized `map_sqlx_to_common_error` function.
-fn map_sqlx_error(e: sqlx::Error) -> RefreshTokenError {
-    // Check for UNIQUE constraint violation (e.g., duplicate token)
-    if let sqlx::Error::Database(db_err) = &e {
-        if db_err.kind() == ErrorKind::UniqueViolation {
-            // Check if it's a token constraint violation
-            let error_message = db_err.message();
-            if error_message.contains("refresh_tokens.token")
-                || error_message.contains("UNIQUE constraint failed")
-            {
-                return RefreshTokenError::AlreadyExists;
-            }
+/// Unique violations arrive with their constraint name already decoded in a
+/// single central place (`CommonError::from_sqlx`); the refresh_tokens table
+/// has exactly one unique constraint (`refresh_tokens.token`), so violating
+/// it means a duplicate token. Every other error passes through as the
+/// transparent `Common` variant, preserving the original database error.
+fn map_common_error(e: CommonError) -> RefreshTokenError {
+    match e {
+        CommonError::UniqueViolation { constraint }
+            if constraint == REFRESH_TOKENS_TOKEN_CONSTRAINT =>
+        {
+            RefreshTokenError::AlreadyExists
         }
+        other => other.into(),
     }
-    // For all other errors, use the centralized conversion
-    map_sqlx_to_common_error(e).into()
 }
 
 pub struct RefreshTokenService {
@@ -107,7 +103,7 @@ impl RefreshTokenService {
             .repository
             .insert(&refresh_token)
             .await
-            .map_err(map_sqlx_error)?;
+            .map_err(map_common_error)?;
         refresh_token.id = id;
         Ok(refresh_token)
     }
@@ -147,7 +143,7 @@ impl RefreshTokenService {
         self.repository
             .delete_by_user_id(user_id)
             .await
-            .map_err(map_sqlx_error)?;
+            .map_err(map_common_error)?;
         Ok(())
     }
 
@@ -202,7 +198,7 @@ impl RefreshTokenService {
             .repository
             .get_by_user_id_and_token(user_id, token)
             .await
-            .map_err(map_sqlx_error)?;
+            .map_err(map_common_error)?;
         if let Some(record) = result {
             if record.expire_at < chrono::Utc::now() {
                 Err(RefreshTokenError::Expired)
@@ -210,7 +206,7 @@ impl RefreshTokenService {
                 self.repository
                     .delete_by_user_id(user_id)
                     .await
-                    .map_err(map_sqlx_error)?;
+                    .map_err(map_common_error)?;
                 Err(RefreshTokenError::AlreadyUsed)
             } else {
                 Ok(true)
@@ -255,7 +251,7 @@ impl RefreshTokenService {
         self.repository
             .update_flag_by_token(token)
             .await
-            .map_err(map_sqlx_error)?;
+            .map_err(map_common_error)?;
         Ok(())
     }
 }
