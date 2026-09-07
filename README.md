@@ -1,5 +1,9 @@
 # db_handler
 
+> [!IMPORTANT]
+> **The canonical repository for this project lives on Forgejo**: <https://code.bhk-itsolutions.com/homeiot/db_handler.git>.
+> This GitHub repository is only a mirror and is **not** the primary git remote.
+
 Rust library for the Home IoT backend: primary database (SQLite), time-series history (InfluxDB 2.x), and domain services (sensors, users, keys, refresh tokens, nonces).
 
 ## Features
