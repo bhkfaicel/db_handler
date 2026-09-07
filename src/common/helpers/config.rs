@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::from_reader;
-use std::{env, fs::File, io::BufReader};
+use std::{env, fmt, fs::File, io::BufReader};
 
 /// Global configuration for the Home IoT backend.
 ///
@@ -26,15 +26,44 @@ use std::{env, fs::File, io::BufReader};
 /// stay valid without any edit.
 ///
 /// Only the fields defined in this struct are read from the JSON file.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct HomeIotConfig {
     primary_db_url: String,
     history_db_url: String,
     history_db_org: String,
+    /// Authentication token for the time-series database. A credential:
+    /// serialization skips it, so the secret can never travel through a
+    /// serialized form of this struct.
+    #[serde(skip_serializing)]
     history_db_token: String,
     /// Name of the InfluxDB bucket that history writes target.
     #[serde(default = "default_bucket_name")]
     bucket_name: String,
+    /// Explicit opt-in to plain `http://` against a non-loopback history
+    /// database host (for example a Docker-internal `influxdb` hostname or
+    /// a private-LAN gateway). Defaults to false: the history client then
+    /// only accepts `https://`, or plain `http://` for loopback hosts.
+    /// Traffic stays unencrypted on the wire when this is true (CWE-319),
+    /// so it must only be set for networks where that is understood.
+    #[serde(default)]
+    history_db_allow_insecure: bool,
+}
+
+// Hand-written Debug: the history token is a credential, so it renders as
+// a fixed marker instead of its value and no log line, panic message or
+// debug dump can ever leak it. Every other field keeps its normal
+// readable rendering for operators.
+impl fmt::Debug for HomeIotConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HomeIotConfig")
+            .field("primary_db_url", &self.primary_db_url)
+            .field("history_db_url", &self.history_db_url)
+            .field("history_db_org", &self.history_db_org)
+            .field("history_db_token", &"[REDACTED]")
+            .field("bucket_name", &self.bucket_name)
+            .field("history_db_allow_insecure", &self.history_db_allow_insecure)
+            .finish()
+    }
 }
 
 /// Default InfluxDB bucket used when a configuration file omits
@@ -113,5 +142,11 @@ impl HomeIotConfig {
     /// Returns the InfluxDB bucket name that history writes target.
     pub fn bucket_name(&self) -> String {
         self.bucket_name.clone()
+    }
+
+    /// Returns whether plain `http://` is explicitly allowed against a
+    /// non-loopback history database host.
+    pub fn history_db_allow_insecure(&self) -> bool {
+        self.history_db_allow_insecure
     }
 }

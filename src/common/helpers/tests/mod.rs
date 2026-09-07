@@ -6,17 +6,12 @@ fn test_config_new_returns_error_when_file_not_found() {
     let nonexistent = env::temp_dir()
         .join("nonexistent_config_dir_12345")
         .join("config.json");
-    // Environment variables are process-global: save and restore so this
-    // test cannot poison every later test that needs CONFIG_FILE.
-    let original = env::var("CONFIG_FILE").ok();
-    env::set_var("CONFIG_FILE", nonexistent.to_str().unwrap());
+    // Environment variables are process-global: take the shared test guard
+    // (it serializes access and restores the previous value on drop).
+    let guard = crate::test_env::ConfigFileGuard::acquire();
+    guard.set(Some(nonexistent.to_str().unwrap()));
     let result = HomeIotConfig::new();
-    match original {
-        Some(v) => env::set_var("CONFIG_FILE", v),
-        None => {
-            env::remove_var("CONFIG_FILE");
-        }
-    }
+    drop(guard);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -37,16 +32,12 @@ fn test_config_new_returns_error_when_json_invalid() {
         .expect("Failed to write");
     drop(file);
 
-    let original = env::var("CONFIG_FILE").ok();
-    env::set_var("CONFIG_FILE", path.to_str().unwrap());
+    let guard = crate::test_env::ConfigFileGuard::acquire();
+    guard.set(Some(path.to_str().unwrap()));
 
     let result = HomeIotConfig::new();
-
-    if let Some(v) = original {
-        env::set_var("CONFIG_FILE", v);
-    } else {
-        env::remove_var("CONFIG_FILE");
-    }
+    // Dropping the guard restores the previous CONFIG_FILE value.
+    drop(guard);
     let _ = std::fs::remove_file(&path);
 
     assert!(result.is_err());
@@ -113,4 +104,47 @@ fn test_bucket_name_defaults_when_field_absent() {
     assert_eq!(config.bucket_name(), "test_bucket");
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// The InfluxDB token is a credential: the Debug rendering of the
+/// configuration must replace it with a fixed marker so any log line,
+/// panic message or debug dump of the config can never leak it, while
+/// every non-secret field keeps its readable rendering for operators.
+#[test]
+fn test_config_debug_redacts_history_db_token() {
+    let tmp_dir = env::temp_dir();
+    let path = tmp_dir.join("home_iot_config_debug_redaction_test.json");
+
+    {
+        let mut file = File::create(&path).expect("Failed to create temp config file");
+        let json = r#"{
+            "primary_db_url": "sqlite:/tmp/home_iot.db",
+            "history_db_url": "http://localhost:8086",
+            "history_db_org": "test-org",
+            "history_db_token": "super-secret-token"
+        }"#;
+        file.write_all(json.as_bytes())
+            .expect("Failed to write temp config");
+    }
+
+    let config = HomeIotConfig::load_from_path(path.to_str().unwrap())
+        .expect("Valid config file should load");
+    let _ = std::fs::remove_file(&path);
+
+    let debug = format!("{:?}", config);
+    assert!(
+        !debug.contains("super-secret-token"),
+        "Debug output leaked the history token: {}",
+        debug
+    );
+    assert!(
+        debug.contains("[REDACTED]"),
+        "Debug output must show the redaction marker: {}",
+        debug
+    );
+    assert!(
+        debug.contains("test-org"),
+        "Debug output must keep non-secret fields readable: {}",
+        debug
+    );
 }

@@ -22,9 +22,9 @@ use std::env;
 ///   and shared-cache semantics are already covered by the `db::primary`
 ///   suite, so only liveness is asserted here.
 ///
-/// One single test on purpose: `CONFIG_FILE` is process-global, and a lone
-/// mutating test cannot race itself even when a filtered run uses the
-/// default parallelism (the canonical gate runs the suite single-threaded).
+/// One single test on purpose (liveness coverage): every `CONFIG_FILE`
+/// mutation is still serialized by the crate's shared test guard, which
+/// also restores the previous value on drop.
 #[tokio::test]
 async fn file_db_pragmas_and_memory_branch_still_work() -> Result<()> {
     // Isolated temporary file database plus a matching config file, mirroring
@@ -40,10 +40,11 @@ async fn file_db_pragmas_and_memory_branch_still_work() -> Result<()> {
         ),
     )?;
 
-    // Environment variables are process-global: save and restore so this
-    // test cannot poison later ones (single-threaded suite).
-    let original = env::var("CONFIG_FILE").ok();
-    env::set_var("CONFIG_FILE", &config_path);
+    // Environment variables are process-global: the shared test guard
+    // serializes the mutation across parallel tests and restores the
+    // previous value on drop.
+    let guard = crate::test_env::ConfigFileGuard::acquire();
+    guard.set(Some(config_path.to_str().unwrap()));
 
     // File branch through the production factory: pooled connections carry
     // the factory's connect options, so any connection observes the pragmas.
@@ -71,7 +72,7 @@ async fn file_db_pragmas_and_memory_branch_still_work() -> Result<()> {
         &memory_config,
         r#"{"primary_db_url":":memory:","history_db_url":"http://localhost:8086","history_db_org":"t","history_db_token":"t"}"#,
     )?;
-    env::set_var("CONFIG_FILE", &memory_config);
+    guard.set(Some(memory_config.to_str().unwrap()));
     let connection = Connection::new().await?;
     let pool = connection.primary_db_client();
     let row = sqlx::query("SELECT 1 AS ok").fetch_one(&*pool).await?;
@@ -81,13 +82,8 @@ async fn file_db_pragmas_and_memory_branch_still_work() -> Result<()> {
         "the :memory: branch must keep producing a usable pool"
     );
 
-    // Restore the environment and remove the temporary files. The `-wal` and
-    // `-shm` sidecars exist only while the database is open; removing them
-    // afterwards is best-effort and must never fail the test.
-    match original {
-        Some(v) => env::set_var("CONFIG_FILE", v),
-        None => env::remove_var("CONFIG_FILE"),
-    }
+    // Drop the guard: it restores the previous CONFIG_FILE value.
+    drop(guard);
     let _ = std::fs::remove_file(&config_path);
     let _ = std::fs::remove_file(&memory_config);
     let _ = std::fs::remove_file(&db_path);

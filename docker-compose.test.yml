@@ -29,8 +29,15 @@ services:
     build:
       context: ..
       dockerfile: db_handler/Dockerfile.test
-      args:
-        CARGO_REGISTRIES_FORGEJO_TOKEN: ${CARGO_REGISTRIES_FORGEJO_TOKEN}
+      # No build args: the registry token is NOT passed through build args
+      # (that would preserve the exposure in build metadata/provenance). The
+      # canonical token path is the BuildKit secret below. For legacy
+      # non-BuildKit runners, a human passes the Dockerfile ARG manually
+      # (e.g. --build-arg) instead — see Dockerfile.test.
+      secrets:
+        # Ephemeral per-build secret mount; requires BuildKit (default on
+        # Docker Engine 23+/Compose v2+).
+        - forgejo_token
     container_name: db_handler_test_runner
     depends_on:
       influxdb:
@@ -42,6 +49,10 @@ services:
       - RUST_BACKTRACE=1
       - SQLX_OFFLINE=true
     volumes:
+      # Cached cargo registry (image CARGO_HOME is /usr/local/cargo — the
+      # Dockerfile's registry config and this mount target agree); the cached
+      # registry and target-vol contents are owned by the image's non-root
+      # user via directory inheritance, so the runtime user can write them.
       - cargo-cache:/usr/local/cargo/registry
       - target-cache:/app/db_handler/target
     working_dir: /app/db_handler
@@ -62,6 +73,12 @@ volumes:
   influxdb_test_data:
   cargo-cache:
   target-cache:
+
+# Build-time-only secret (Forgejo registry token) sourced from the
+# environment — the container runtime environment never sees it.
+secrets:
+  forgejo_token:
+    environment: CARGO_REGISTRIES_FORGEJO_TOKEN
 
 networks:
   test-network:

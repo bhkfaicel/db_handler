@@ -36,3 +36,33 @@ async fn should_reject_duplicate_mac() -> Result<()> {
     );
     Ok(())
 }
+
+/// The MAC format contract is enforced at the service's trust boundary:
+/// `sensors.mac` roots the foreign-key chain (`keys.mac` ->
+/// `nonces.mac`), so a malformed address (line-protocol metacharacters)
+/// is refused as `SensorError::InvalidMac` BEFORE any database work and
+/// no row can be inserted.
+#[tokio::test]
+async fn should_reject_invalid_mac() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client();
+    let service = SensorService::new(connection);
+
+    let malicious = "AA,BB CC=DD:EE:FF";
+    let result = service.add(malicious).await;
+    assert!(
+        matches!(&result, Err(SensorError::InvalidMac(mac)) if mac == malicious),
+        "expected SensorError::InvalidMac, got: {result:?}"
+    );
+    // Nothing may have been written for the refused MAC.
+    let stored = sqlx::query("SELECT 1 FROM sensors WHERE mac = ?")
+        .bind(malicious)
+        .fetch_optional(&*pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    assert!(
+        stored.is_none(),
+        "a refused MAC must not be inserted into sensors"
+    );
+    Ok(())
+}

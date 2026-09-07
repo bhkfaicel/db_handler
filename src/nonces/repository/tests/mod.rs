@@ -184,22 +184,17 @@ async fn test_insert_nonce_exists() -> Result<()> {
     let insert_result = repository.insert(&nonce).await;
     let err = insert_result.expect_err("UNIQUE constraint failed");
     match err {
-        // A fully duplicated nonce violates the inline UNIQUE(value); the
-        // composite UNIQUE(value, mac) that used to fire alongside it was
-        // removed by the table-rebuild migration, so SQLite now reports
-        // `nonces.value`. The assertion accepts both constraint names
-        // (typed, not message-based) to cover databases in either schema
-        // state.
-        CommonError::UniqueViolation { constraint }
-            if constraint == "nonces.value" || constraint == "nonces.value, nonces.mac" =>
-        {
-            Ok(())
-        }
+        // The schema decision is final: a single column-level UNIQUE(value)
+        // exists on `nonces` (the composite index was removed by the
+        // rebuild migration and the global scope is the validated
+        // anti-replay semantics), so SQLite reports exactly `nonces.value`
+        // in every reachable database state. The former dual-acceptance of
+        // the composite constraint name asserted a schema tolerance that no
+        // longer exists; the legacy pre-migration schema is covered by the
+        // rebuild-migration tests below.
+        CommonError::UniqueViolation { constraint } if constraint == "nonces.value" => Ok(()),
         other => {
-            panic!(
-                "Expected UniqueViolation on a nonces constraint, got {:?}",
-                other
-            );
+            panic!("Expected UniqueViolation on nonces.value, got {:?}", other);
         }
     }
 }
@@ -333,10 +328,11 @@ async fn test_legacy_deployment_rebuild_preserves_data_and_ledger() -> Result<()
         ),
     )?;
 
-    // Environment variables are process-global: save and restore so this
-    // test cannot poison later ones (single-threaded suite).
-    let original = env::var("CONFIG_FILE").ok();
-    env::set_var("CONFIG_FILE", &config_path);
+    // Environment variables are process-global: take the shared test guard
+    // (it serializes access across parallel tests and restores the previous
+    // value on drop).
+    let guard = crate::test_env::ConfigFileGuard::acquire();
+    guard.set(Some(config_path.to_str().unwrap()));
 
     let test_body = async {
         // Boot 1 on a fresh file: every embedded migration applies. This is
@@ -457,12 +453,9 @@ async fn test_legacy_deployment_rebuild_preserves_data_and_ledger() -> Result<()
     }
     .await;
 
-    match original {
-        Some(v) => env::set_var("CONFIG_FILE", v),
-        None => {
-            env::remove_var("CONFIG_FILE");
-        }
-    }
+    // Drop the guard: it restores the previous CONFIG_FILE value whatever
+    // the test body's outcome.
+    drop(guard);
     let _ = std::fs::remove_file(&config_path);
     let _ = std::fs::remove_file(&db_path);
     test_body

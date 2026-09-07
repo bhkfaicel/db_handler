@@ -45,7 +45,7 @@ impl HistoricalKeyService {
     ///     let service = HistoricalKeyService::new(connection);
     ///     let key = [26; 32];
     ///     let historical_key = service.add(key).await?;
-    ///     println!("Inserted historical key : {:?}", historical_key);
+    ///     println!("Inserted historical key with id {}", historical_key.id);
     ///     Ok(())
     ///  }
     ///
@@ -89,7 +89,7 @@ impl HistoricalKeyService {
     ///     let mut tx = connection.primary_db_client().begin().await?;
     ///     let historical_key = service.add_with_transaction(&mut tx, key).await?;
     ///     tx.commit().await?;
-    ///     println!("Inserted historical key : {:?}", historical_key);
+    ///     println!("Inserted historical key with id {}", historical_key.id);
     ///     Ok(())
     ///  }
     ///

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::users::model::{User, UserSortKey};
 
 use super::model::InternalUser;
-use super::password::verify_password_async;
+use super::password::{verify_password_async, DUMMY_BCRYPT_HASH};
 
 /// Repository for performing CRUD operations on `User` entities.
 ///
@@ -127,25 +127,33 @@ impl UserRepository {
         .await
         .map_err(map_sqlx_to_common_error)?;
 
-        if let Some(record) = result {
-            // bcrypt verification costs ~100-300 ms of CPU at cost 12; the
-            // async helper runs it on the blocking pool so the tokio worker
-            // stays responsive while logins are processed.
-            match verify_password_async(password, record.password_hash).await {
-                Ok(true) => {
-                    let id = record.id.ok_or_else(|| {
-                        CommonError::Operation("Missing id in database record".to_string())
-                    })? as u32;
-                    Ok(Some(User {
-                        id,
-                        username: record.username,
-                        email: record.email,
-                    }))
-                }
-                _ => Ok(None),
+        // Single always-verify path: bcrypt runs exactly once whether or
+        // not the email exists. An unknown email verifies against a fixed
+        // dummy hash (same DEFAULT_COST policy, see `DUMMY_BCRYPT_HASH`),
+        // so both branches burn identical CPU and response time can no
+        // longer reveal whether an email is registered (timing
+        // user-enumeration oracle, CWE-208).
+        let stored_hash = result.as_ref().map(|record| record.password_hash.clone());
+        let verified = verify_password_async(
+            password,
+            stored_hash.unwrap_or_else(|| DUMMY_BCRYPT_HASH.to_owned()),
+        )
+        .await;
+
+        match (result, verified) {
+            (Some(record), Ok(true)) => {
+                let id = record.id.ok_or_else(|| {
+                    CommonError::Operation("Missing id in database record".to_string())
+                })? as u32;
+                Ok(Some(User {
+                    id,
+                    username: record.username,
+                    email: record.email,
+                }))
             }
-        } else {
-            Ok(None)
+            // Any other combination — unknown email, wrong password, or a
+            // verification error — reports no user, as before.
+            _ => Ok(None),
         }
     }
 

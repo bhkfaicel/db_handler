@@ -6,6 +6,8 @@
 //! InfluxDB stalled `set_history` indefinitely while the corresponding
 //! SQLite update was already committed.
 
+mod policy;
+
 use crate::db::history::connection::get_time_series_database_client;
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -49,10 +51,11 @@ async fn hung_influx_server_write_fails_through_request_timeout() -> Result<()> 
         ),
     )?;
 
-    // `CONFIG_FILE` is process-global: save and restore so this test cannot
-    // poison later ones (the canonical suite runs single-threaded).
-    let original = std::env::var("CONFIG_FILE").ok();
-    std::env::set_var("CONFIG_FILE", &config_path);
+    // `CONFIG_FILE` is process-global: take the shared test guard, which
+    // serializes access across parallel tests and restores the previous
+    // value on drop.
+    let guard = crate::test_env::ConfigFileGuard::acquire();
+    guard.set(Some(config_path.to_str().unwrap()));
 
     let (client, bucket) =
         get_time_series_database_client(Duration::from_secs(1), Duration::from_secs(2)).await?;
@@ -79,11 +82,8 @@ async fn hung_influx_server_write_fails_through_request_timeout() -> Result<()> 
         "the request timeout must end the wait quickly, took {elapsed:?}"
     );
 
-    // Restore the environment and remove the temporary config file.
-    match original {
-        Some(v) => std::env::set_var("CONFIG_FILE", v),
-        None => std::env::remove_var("CONFIG_FILE"),
-    }
+    // Drop the guard: it restores the previous CONFIG_FILE value.
+    drop(guard);
     let _ = std::fs::remove_file(&config_path);
     Ok(())
 }

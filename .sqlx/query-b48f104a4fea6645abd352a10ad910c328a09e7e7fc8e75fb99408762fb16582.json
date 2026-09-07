@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM historical_keys WHERE expire_at < ? AND NOT EXISTS (SELECT 1 FROM keys WHERE keys.value = historical_keys.value)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b48f104a4fea6645abd352a10ad910c328a09e7e7fc8e75fb99408762fb16582"
+}

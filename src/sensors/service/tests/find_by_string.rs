@@ -9,7 +9,10 @@ async fn should_return_sensors() -> Result<()> {
     let mut sensors: Vec<Sensor> = Vec::new();
     let service = SensorService::new(connection.clone());
     for i in 1..30 {
-        let mac = i.to_string();
+        // Well-formed six-hex-pair MAC: the MAC format is a validated
+        // invariant of the registration boundary, so fixtures must carry
+        // realistic addresses (2-digit uppercase hex suffix, unique per i).
+        let mac = format!("00:00:00:00:00:{:02X}", i);
         sensors.push(Sensor {
             id: i,
             mac: mac.clone(),

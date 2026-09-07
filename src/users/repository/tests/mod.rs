@@ -216,6 +216,24 @@ async fn test_get_by_email_and_password_no_user_on_db() -> Result<()> {
     Ok(())
 }
 
+// Deterministic absent-branch exercise for the always-verify login path:
+// with no matching user, the lookup must still complete the full bcrypt
+// verification against the fixed dummy hash (the password-helpers test
+// proves that constant is a real cost-12 hash that rejects passwords, so
+// reaching None below required real bcrypt work) and only then report no
+// user. This keeps the unknown-email response's CPU cost identical to the
+// wrong-password response, closing the timing-based email enumeration.
+#[tokio::test]
+async fn test_get_by_email_and_password_absent_email_verifies_dummy_hash() -> Result<()> {
+    let connection = Connection::new().await?;
+    let repository = UserRepository::new(connection.primary_db_client().clone());
+    let result = repository
+        .get_by_email_and_password("nobody@bhk.com".to_string(), "password".to_string())
+        .await?;
+    assert!(result.is_none());
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_get_by_email_and_password_wrong_password() -> Result<()> {
     let connection = Connection::new().await?;

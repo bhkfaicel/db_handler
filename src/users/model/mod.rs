@@ -3,15 +3,21 @@ use utoipa::ToSchema;
 
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::fmt;
 
 use crate::drives::columns::HasColumns;
 use db_derive::HasColumns;
 
-#[derive(Debug, FromRow, HasColumns, PartialEq, Serialize, Deserialize)]
+#[derive(FromRow, HasColumns, PartialEq, Serialize, Deserialize)]
 pub(crate) struct InternalUser {
     pub id: u32,
     pub username: String,
     pub email: String,
+    /// Bcrypt password hash. A credential-equivalent secret:
+    /// serialization skips this field so the hash never travels through a
+    /// serialized form of the model, while deserialization keeps
+    /// accepting a complete payload.
+    #[serde(skip_serializing)]
     pub password_hash: Option<String>,
 }
 
@@ -28,6 +34,25 @@ impl InternalUser {
             email,
             password_hash,
         }
+    }
+}
+
+// Hand-written Debug: the password hash is a credential-equivalent
+// secret, so its value renders as a fixed marker and no log line, panic
+// message or debug dump can ever leak it. Only the presence of a hash
+// stays visible (`Some`/`None`) for debugging; every other field keeps
+// its normal readable rendering.
+impl fmt::Debug for InternalUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InternalUser")
+            .field("id", &self.id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field(
+                "password_hash",
+                &self.password_hash.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
     }
 }
 

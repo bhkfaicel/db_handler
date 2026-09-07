@@ -3,5 +3,6 @@
   "history_db_url": "http://localhost:8086",
   "history_db_org": "your-org",
   "history_db_token": "your-influxdb-token",
-  "bucket_name": "test_bucket"
+  "bucket_name": "test_bucket",
+  "history_db_allow_insecure": false
 }

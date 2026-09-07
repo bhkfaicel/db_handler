@@ -13,6 +13,19 @@
 use anyhow::Result;
 use bcrypt::{hash, verify, DEFAULT_COST};
 
+/// Fixed dummy hash used by the login lookup when the email does not exist.
+///
+/// A valid bcrypt hash of a random 32-character string, generated at the
+/// SAME cost policy as real stored hashes (`DEFAULT_COST`): verifying a
+/// presented password against it lets the unknown-email login branch burn
+/// exactly the same CPU as the known-email branch, so response timing
+/// cannot distinguish a registered email from an unknown one (timing
+/// user-enumeration oracle, CWE-208). The clear-text source string is
+/// deliberately discarded after generation; no realistic password verifies
+/// against this constant.
+pub(crate) const DUMMY_BCRYPT_HASH: &str =
+    "$2b$12$ejBn2v/cqgDnpTh.TI9PJeF7It.dktAeBplnlIrwnj8EM42Ln7km6";
+
 /// Hashes a clear-text password with bcrypt (default cost).
 ///
 /// Synchronous primitive: async paths must use `hash_password_async`.
@@ -25,8 +38,8 @@ pub(crate) fn hash_password(password: &str) -> Result<String> {
 ///
 /// Synchronous primitive: async paths must use `verify_password_async`.
 pub(crate) fn verify_password(password: &str, hash: &str) -> Result<bool> {
-    let is_valid = verify(password, hash)?;
-    Ok(is_valid)
+    let verified = verify(password, hash)?;
+    Ok(verified)
 }
 
 /// Hashes a clear-text password with bcrypt off the async runtime.

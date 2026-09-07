@@ -1,5 +1,8 @@
 // Minimal behavioral tests for the user data models: constructor behavior
-// and serde round-trip stability (serialize -> deserialize -> equality).
+// and serde behavior, including the redaction of the secret password hash
+// (Debug marker, serialization skip, deserialization kept).
+
+use serde_json::json;
 
 use crate::users::model::{InternalUser, User, UserSortKey};
 
@@ -18,7 +21,7 @@ fn test_user_constructor_and_serde_round_trip() {
 }
 
 #[test]
-fn test_internal_user_constructor_and_serde_round_trip() {
+fn test_internal_user_constructor_serde_and_redaction() {
     // The crate-internal model additionally carries the optional hash.
     let internal = InternalUser::new(
         2,
@@ -29,9 +32,38 @@ fn test_internal_user_constructor_and_serde_round_trip() {
     assert_eq!(internal.id, 2);
     assert_eq!(internal.password_hash.as_deref(), Some("hash"));
 
-    // Serde round-trip keeps every field, the hash included, in place.
-    let json = serde_json::to_string(&internal).expect("serialization must succeed");
-    let back: InternalUser = serde_json::from_str(&json).expect("deserialization must succeed");
+    // Debug output replaces the hash value with the fixed redaction
+    // marker; only the hash presence stays visible for debugging.
+    let debug = format!("{:?}", internal);
+    assert!(
+        !debug.contains("Some(\"hash\")"),
+        "Debug output leaked the password hash: {}",
+        debug
+    );
+    assert!(
+        debug.contains("[REDACTED]"),
+        "Debug output must show the redaction marker: {}",
+        debug
+    );
+
+    // Serialization skips the hash field entirely, so no serialized form
+    // of this model ever carries the secret.
+    let serialized = serde_json::to_string(&internal).expect("serialization must succeed");
+    assert!(
+        !serialized.contains("hash"),
+        "serialized form leaked the password hash: {}",
+        serialized
+    );
+
+    // Deserialization is kept: a complete payload carrying the hash
+    // still parses back into the model with every field in place.
+    let back: InternalUser = serde_json::from_value(json!({
+        "id": 2,
+        "username": "bob",
+        "email": "bob@example.com",
+        "password_hash": "hash",
+    }))
+    .expect("deserialization of a complete payload must succeed");
     assert_eq!(back, internal);
 }
 

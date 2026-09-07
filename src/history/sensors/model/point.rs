@@ -10,24 +10,34 @@ use crate::history::sensors::model::{fields::SensorFields, tags::SensorTags};
 /// - Fields (actual measured values)
 /// - Timestamp
 ///
+/// Line-protocol rendering happens exclusively through InfluxDB's
+/// `DataPoint::builder`, which performs the required escaping of the
+/// tag and field values; no manual formatter is kept here.
+///
 /// # Example
 ///
-/// no_run
-/// use db_handler::history::sensors::model::point::SensorDataPoint;
-/// use db_handler::history::sensors::model::fields::SensorFields;
-/// use db_handler::history::sensors::model::tags::SensorTags;
+/// Build the InfluxDB point exactly like the write path does. The
+/// example is `ignore` rather than a compiled doctest: `SensorDataPoint`
+/// lives in a crate-private module, so no import path for it can link
+/// from an external doctest crate.
+///
+/// ```ignore
+/// use db_handler::history::sensors::model::{SensorDataPoint, SensorFields, SensorTags};
 /// use db_handler::sensors::model::ProductType;
 /// use chrono::Utc;
+/// use influxdb2::models::{DataPoint, FieldValue};
 ///
 /// let tags = SensorTags::new(
 ///     ProductType::ContactSensor,
 ///     123,
 ///     "AA:BB:CC:DD:EE:01".to_string(),
-/// );
+/// )
+/// .expect("the MAC is well formed");
 ///
 /// let fields = SensorFields::Contact {
 ///     is_open: true,
 ///     vibration_count: None,
+///     sensor_timestamp: None,
 /// };
 ///
 /// let point = SensorDataPoint {
@@ -37,9 +47,19 @@ use crate::history::sensors::model::{fields::SensorFields, tags::SensorTags};
 ///     timestamp: Utc::now(),
 /// };
 ///
-/// # let point = SensorDataPoint::new("sensor_data".to_string(), tags, fields);
-/// # let line_protocol = point.to_line_protocol();
-///
+/// let datapoint = DataPoint::builder(point.measurement.as_str())
+///     .tag("sensor_mac", point.tags.sensor_mac.as_str())
+///     .field(
+///         "is_open",
+///         FieldValue::from(matches!(
+///             point.fields,
+///             SensorFields::Contact { is_open: true, .. }
+///         )),
+///     )
+///     .build()
+///     .expect("a valid data point");
+/// let _ = datapoint;
+/// ```
 #[derive(Debug, Clone)]
 pub struct SensorDataPoint {
     /// Measurement name (e.g., "sensor_data")
@@ -67,30 +87,30 @@ impl SensorDataPoint {
     ///
     /// # Example
     ///
-    /// no_run
+    /// The example is `ignore` rather than a compiled doctest:
+    /// `SensorDataPoint` lives in a crate-private module, so no import
+    /// path for it can link from an external doctest crate.
     ///
-    /// # use crate::history::sensors::model::point::SensorDataPoint;
-    /// # use crate::history::sensors::model::fields::SensorFields;
-    /// # use crate::history::sensors::model::tags::SensorTags;
-    /// # use crate::sensors::model::ProductType;
-    /// #
-    /// # let tags = SensorTags::new(
-    /// #     ProductType::ContactSensor,
-    /// #     123,
-    /// #     "AA:BB:CC:DD:EE:01".to_string(),
-    /// # );
-    /// #
-    /// # let fields = SensorFields::Contact {
-    /// #     is_open: true,
-    /// #     vibration_count: None,
-    /// # };
-    /// #
-    /// # let point = SensorDataPoint::new(
-    /// #     "sensor_data".to_string(),
-    /// #     tags,
-    /// #     fields,
-    /// # );
+    /// ```ignore
+    /// use db_handler::history::sensors::model::{SensorDataPoint, SensorFields, SensorTags};
+    /// use db_handler::sensors::model::ProductType;
     ///
+    /// let tags = SensorTags::new(
+    ///     ProductType::ContactSensor,
+    ///     123,
+    ///     "AA:BB:CC:DD:EE:01".to_string(),
+    /// )
+    /// .expect("the MAC is well formed");
+    ///
+    /// let fields = SensorFields::Contact {
+    ///     is_open: true,
+    ///     vibration_count: None,
+    ///     sensor_timestamp: None,
+    /// };
+    ///
+    /// let point = SensorDataPoint::new("sensor_data".to_string(), tags, fields);
+    /// let _ = point;
+    /// ```
     pub fn new(measurement: String, tags: SensorTags, fields: SensorFields) -> Self {
         Self {
             measurement,
@@ -98,55 +118,5 @@ impl SensorDataPoint {
             fields,
             timestamp: Utc::now(),
         }
-    }
-
-    /// Converts the data point to Line Protocol format (compatible with InfluxDB).
-    ///
-    /// # Returns
-    ///
-    /// A string in Line Protocol format:
-    /// `measurement,tag1=value1,tag2=value2 field1=value1,field2=value2 timestamp`
-    ///
-    /// # Example
-    ///
-    /// no_run
-    ///
-    /// # use crate::history::sensors::model::point::SensorDataPoint;
-    /// # use crate::history::sensors::model::fields::SensorFields;
-    /// # use crate::history::sensors::model::tags::SensorTags;
-    /// # use crate::sensors::model::ProductType;
-    /// # use chrono::Utc;
-    /// #
-    /// # let tags = SensorTags::new(
-    /// #     ProductType::ContactSensor,
-    /// #     123,
-    /// #     "AA:BB:CC:DD:EE:01".to_string(),
-    /// # );
-    /// #
-    /// # let fields = SensorFields::Contact {
-    /// #     is_open: true,
-    /// #     vibration_count: None,
-    /// # };
-    /// #
-    /// # let point = SensorDataPoint {
-    /// #     measurement: "sensor_data".to_string(),
-    /// #     tags,
-    /// #     fields,
-    /// #     timestamp: Utc::now(),
-    /// # };
-    /// #
-    /// # let line_protocol = point.to_line_protocol();
-    /// # assert!(line_protocol.starts_with("sensor_data,"));
-    /// # assert!(line_protocol.contains("is_open=true"));
-    ///
-    pub fn to_line_protocol(&self) -> String {
-        let tags_str = self.tags.to_line_protocol();
-        let fields_str = self.fields.to_line_protocol();
-        let timestamp_ns = self.timestamp.timestamp_nanos_opt().unwrap_or(0);
-
-        format!(
-            "{},{} {} {}",
-            self.measurement, tags_str, fields_str, timestamp_ns
-        )
     }
 }

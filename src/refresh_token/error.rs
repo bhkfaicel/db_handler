@@ -1,5 +1,29 @@
 use crate::db::primary::error::CommonError;
+use crate::refresh_token::model::RefreshToken;
 use thiserror::Error;
+
+/// Outcome of an atomic refresh-token rotation
+/// (`RefreshTokenService::rotate`).
+///
+/// Rotation consumes the presented token and inserts its replacement in ONE
+/// database transaction. When the presented token cannot be consumed, the
+/// follow-up lookup in the same transaction classifies why:
+#[derive(Debug, PartialEq)]
+pub enum RotationOutcome {
+    /// The token was consumed and its replacement inserted in the same
+    /// transaction; carries the inserted replacement.
+    Rotated(RefreshToken),
+
+    /// No row matches the (user_id, token) pair.
+    NotFound,
+
+    /// The token exists but its expiry has passed; it was left untouched.
+    Expired,
+
+    /// The token was already consumed (replay): every token of the user was
+    /// deleted inside the same transaction as reuse mitigation.
+    ReuseDetected,
+}
 
 /// Errors that can occur when working with refresh tokens.
 #[derive(Debug, Error)]

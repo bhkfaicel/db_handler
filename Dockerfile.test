@@ -1,4 +1,6 @@
-# Dockerfile for test environment
+# Dockerfile for test environment — the test gate runs as a dedicated
+# non-root user (no USER directive privileges, no root writes at runtime).
+# syntax=docker/dockerfile:1
 FROM rust:1.93-slim
 
 # Install required system dependencies
@@ -10,40 +12,74 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Forgejo registry for db_derive crate (pass CARGO_REGISTRIES_FORGEJO_TOKEN at build time, e.g. via .env)
-# Use a dedicated CARGO_HOME so our config is found (slim image may use /usr/local/cargo)
+# Dedicated non-root user for the build RUN steps below and the runtime CMD.
+ARG USERNAME=cargotest
+RUN adduser --disabled-password --gecos "" "$USERNAME"
+
+# Forgejo registry for the db_derive crate. The token is NOT baked into the
+# image by default: it is passed per-build with a BuildKit secret mount
+# (docker-compose.test.yml -> build.secrets, RUN --mount=type=secret below),
+# which never lands in image layers or build history.
+#
+# RETAINED ARG FALLBACK for MANUAL non-BuildKit builds only — a human passes
+# it explicitly (e.g. `docker build --build-arg CARGO_REGISTRIES_FORGEJO_TOKEN=...`);
+# Compose never passes it by default (secret mount only). ACCEPTED RESIDUAL
+# RISK, severity LOW only after the user confirms package-RUN-ONLY (read)
+# token scope in the Forgejo UI; until confirmed the scope is UNVERIFIED and
+# unresolved, with NO privilege assumption. Empty by default (builders that
+# neither mount the secret nor pass the arg simply get no token, as before).
 ARG CARGO_REGISTRIES_FORGEJO_TOKEN
-ENV CARGO_HOME=/root/.cargo
-RUN mkdir -p "$CARGO_HOME" && \
-    printf '%s\n' \
+
+# Registry credential provider config under the rust image's default
+# CARGO_HOME (/usr/local/cargo) — deliberately ALIGNED with
+# docker-compose.test.yml, which mounts the cargo cache volume at
+# /usr/local/cargo/registry (the old /root/.cargo split is gone).
+RUN printf '%s\n' \
     '[registries.forgejo]' \
     'index = "sparse+https://code.bhk-itsolutions.com/api/packages/homeiot/cargo/"' \
     '' \
     '[registry]' \
     'global-credential-providers = ["cargo:token"]' \
-    > "$CARGO_HOME/config.toml"
+    > /usr/local/cargo/config.toml
 
-# Create working directory
+# Hand the rust toolchain tree (config + registry cache mount target) and the
+# workdir to the runtime user: named volumes seeded by compose inherit the
+# ownership of these directories from the image.
+RUN chown -R "$USERNAME" /usr/local/cargo && \
+    mkdir -p /app/db_handler/target && \
+    chown "$USERNAME" /app/db_handler /app/db_handler/target
+
+# Create working directory (owned by the runtime user from here on).
 WORKDIR /app/db_handler
 
 # Copy dependency files (to optimize Docker cache)
 COPY db_handler/Cargo.toml db_handler/Cargo.lock ./
 COPY db_handler/.sqlx ./.sqlx
+RUN chown -R "$USERNAME" .
 
-# Create a dummy project to pre-compile dependencies
-RUN mkdir -p src && \
+# The user runs everything below.
+USER "$USERNAME"
+
+# Create a dummy project to pre-compile dependencies. The Forgejo token is
+# mounted as an ephemeral secret env var (never persisted); without BuildKit
+# support on a legacy runner the ARG above is exported for this one layer.
+# Docker mounts the secret file into the layer only.
+RUN --mount=type=secret,id=forgejo_token,env=CARGO_REGISTRIES_FORGEJO_TOKEN \
+    mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
     cargo build --features sensors,utoipaDoc,users --release && \
     rm -rf src
 
-# Copy actual source code
-COPY db_handler/src ./src
-COPY db_handler/migrations ./migrations
-COPY db_handler/scripts ./scripts
-COPY db_handler/config.test.json ./config.test.json
+# Copy actual source code (COPY --chown creates the files as the runtime
+# user directly — a plain COPY under a non-root USER lands as root:root, and
+# an unprivileged chown could never reclaim them).
+COPY --chown="$USERNAME" db_handler/src ./src
+COPY --chown="$USERNAME" db_handler/migrations ./migrations
+COPY --chown="$USERNAME" db_handler/scripts ./scripts
+COPY --chown="$USERNAME" db_handler/config.test.json ./config.test.json
 
-# Create directory for test data
-RUN mkdir -p /app/db_handler/data
+# Create directory for test data (parent already owned by the user)
+RUN mkdir /app/db_handler/data
 
 # Default environment variables for tests
 ENV RUST_BACKTRACE=1
@@ -51,5 +87,5 @@ ENV SQLX_OFFLINE=true
 
 # Default command: the same gate as local CI (scripts/test.sh); Docker
 # overrides CONFIG_FILE and adds the InfluxDB-backed ignored-test pass via
-# docker-compose.test.yml
+# docker-compose.test.yml — executed as the non-root user above.
 CMD ["bash", "scripts/test.sh"]

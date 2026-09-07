@@ -39,7 +39,9 @@ impl Repository {
         vibration_count: Option<VibrationCount>,
         sensor_timestamp: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        let tags = SensorTags::new(ProductType::ContactSensor, sensor_id, sensor_mac.clone());
+        // The MAC is validated here (constructor): a malformed address
+        // fails the write before any network traffic happens.
+        let tags = SensorTags::new(ProductType::ContactSensor, sensor_id, sensor_mac.clone())?;
         let fields = SensorFields::Contact {
             is_open,
             vibration_count,

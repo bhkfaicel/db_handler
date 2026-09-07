@@ -42,6 +42,20 @@ impl Service for KeyService {
 impl KeyService {
     /// Inserts a new key into the database.
     ///
+    /// # Key entropy contract
+    ///
+    /// `value` is type-enforced as `[u8; 32]` (256 bits) and MUST come
+    /// from a CSPRNG, freshly generated for every rotation; deriving it
+    /// from predictable material or reusing it across rotations defeats
+    /// the scheme.
+    ///
+    /// # MAC format contract
+    ///
+    /// `mac` must be six hexadecimal pairs separated by `:` (case
+    /// -insensitive, e.g. `AA:BB:26:06:19:91`); any other value is
+    /// rejected as `KeyError::InvalidMacFormat` before the rotation
+    /// transaction begins.
+    ///
     /// # Arguments
     ///
     /// * `value` - array of 32 bytes containing the key.
@@ -64,11 +78,18 @@ impl KeyService {
     ///     let key = [26; 32];
     ///     let mac = "AA:BB:26:06:19:91";
     ///     let key = service.add(key, mac).await?;
-    ///     println!("Inserted key : {:?}", key);
+    ///     println!("Inserted key with id {}", key.id);
     ///     Ok(())
     ///  }
     /// ```
     pub async fn add(&self, key: [u8; 32], mac: &str) -> Result<Key> {
+        // Trust boundary: a malformed MAC is refused before any database
+        // work, so no ill-formed address can reach the ledger or the
+        // anti-replay chain keyed on it.
+        if !crate::common::helpers::mac::is_valid(mac) {
+            return Err(KeyError::invalid_mac(mac));
+        }
+
         // Start a transaction to ensure atomicity
         let mut tx = self
             .connection
@@ -79,16 +100,37 @@ impl KeyService {
 
         let historical_key_service = HistoricalKeyService::new(self.connection.clone());
 
-        // Retention piggyback: purge historical keys whose retention
-        // window has elapsed inside this same guaranteed transaction.
-        // Rotation is the only writer of the table, so the steady state
-        // stays bounded (about 720 rows per sensor over the 30-day
-        // window) and the purge is a scan of that bounded table; no
-        // `expire_at` index is added on purpose — one more B-tree write
-        // per insert to accelerate a negligible scan is a documented
-        // ceiling.
+        // Retention piggyback with dependency-safe ordering inside this
+        // one guaranteed transaction. Foreign-key chain: `keys.value` ->
+        // `historical_keys.value` (NO ACTION), `nonces.mac` -> `keys.mac`
+        // (ON DELETE CASCADE).
+        //
+        // 1. Expired key rows are purged FIRST. They are unusable (every
+        //    lookup filters on `expire_at`) and their anti-replay nonces
+        //    cascade away with them. Without this step a sensor offline
+        //    longer than the historical retention window would keep its
+        //    expired key row alive forever, and the purge below would
+        //    abort every rotation of every sensor on the foreign key.
+        // 2. Expired historical keys are purged SECOND, guarded by
+        //    NOT EXISTS so a row still referenced by a LIVE key is never
+        //    deleted regardless of statement order (safety belt).
+        //
+        // Resulting contract: expired key rows leave at the next rotation
+        // of any sensor (bounded memory), historical keys follow once
+        // unreferenced, nonces leave via cascade when their key row goes
+        // (at its MAC's rotation or through the expired-keys purge).
+        // Rotation is the only writer of the historical table, so the
+        // steady state stays bounded (about 720 rows per sensor over the
+        // 30-day window) and the purges are scans of those bounded
+        // tables; no `expire_at` index is added on purpose — one more
+        // B-tree write per insert to accelerate a negligible scan is a
+        // documented ceiling.
+        let now = Utc::now();
+        self.repository
+            .delete_expired_with_transaction(&mut tx, now)
+            .await?;
         historical_key_service
-            .delete_expired_with_transaction(&mut tx, Utc::now())
+            .delete_expired_with_transaction(&mut tx, now)
             .await?;
 
         historical_key_service
@@ -156,7 +198,7 @@ impl KeyService {
     ///     let service = KeyService::new(connection);
     ///     let mac = "AA:BB:26:06:19:91";
     ///     let key = service.get_by_mac(mac).await?;
-    ///     println!("key : {:?}", key);
+    ///     println!("Found key with id {}", key.id);
     ///     Ok(())
     ///  }
     /// ```

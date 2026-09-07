@@ -49,8 +49,13 @@ impl Service for SensorService {
 }
 impl SensorService {
     pub async fn add(&self, mac: &str) -> Result<u32> {
-        if mac.is_empty() {
-            return Err(SensorError::invalid_mac("MAC address cannot be empty"));
+        // Trust boundary: a sensor MAC must be a well-formed address
+        // (six hexadecimal pairs separated by `:`, case-insensitive)
+        // because `sensors.mac` roots the foreign-key chain
+        // (`keys.mac` -> `nonces.mac`); a hostile value here would flow
+        // into every downstream record.
+        if !crate::common::helpers::mac::is_valid(mac) {
+            return Err(SensorError::invalid_mac(mac));
         }
         let sensor = Sensor::new(0, mac.to_string(), Status::InProgress);
         self.repository

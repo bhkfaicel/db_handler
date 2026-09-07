@@ -3,6 +3,7 @@ use crate::db::connection::Connection;
 use crate::db::primary::service::Service;
 use crate::history::keys::{model::HistoricalKey, service::HistoricalKeyService};
 use crate::keys::error::KeyError;
+use crate::nonces::service::NonceService;
 use crate::sensors::service::SensorService;
 
 #[tokio::test]
@@ -81,6 +82,26 @@ async fn test_add_key_that_exists_on_historical_key() -> anyhow::Result<()> {
 }
 
 //TODO test service.get
+
+/// The MAC format contract is enforced at the service's trust boundary:
+/// a malformed address (line-protocol metacharacters) is refused as
+/// `KeyError::InvalidMacFormat` BEFORE any database work, so no rotation
+/// transaction is started and no row can be touched.
+#[tokio::test]
+async fn test_add_key_rejects_invalid_mac() -> anyhow::Result<()> {
+    let connection = Connection::new().await?;
+    let service = KeyService::new(connection.clone());
+
+    let malicious = "AA,BB CC=DD:EE:FF";
+    let result = service.add([26; 32], malicious).await;
+    match result {
+        Err(KeyError::InvalidMacFormat(msg)) => {
+            assert_eq!(msg, malicious, "the error must echo the offending MAC");
+        }
+        other => panic!("Expected KeyError::InvalidMacFormat, got {:?}", other),
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_get_by_mac_returns_key_when_exists() -> anyhow::Result<()> {
@@ -299,6 +320,177 @@ async fn test_add_key_purges_expired_historical_keys() -> anyhow::Result<()> {
         remaining.len(),
         2,
         "the seeded valid row and the fresh rotation row must stay"
+    );
+    Ok(())
+}
+
+/// Foreign-key safety belt: an expired historical key still referenced by
+/// a LIVE key row must survive the retention purge — deleting it would
+/// violate `keys.value -> historical_keys.value` (NO ACTION) and abort the
+/// rotation — while an expired, unreferenced historical row goes. The
+/// rotation must succeed through both outcomes without any error.
+#[tokio::test]
+async fn test_add_key_purge_keeps_historical_key_referenced_by_live_key() -> anyhow::Result<()> {
+    use chrono::{Duration, Utc};
+
+    let connection = Connection::new().await?;
+    let service = KeyService::new(connection.clone());
+    let sensor_service = SensorService::new(connection.clone());
+
+    // One sensor keeps a live key, the other performs the rotation whose
+    // transaction runs the retention purges.
+    let live_mac = "AA:BB:26:06:19:C1";
+    let rotating_mac = "AA:BB:26:06:19:C2";
+    for mac in [live_mac, rotating_mac] {
+        let _ = sensor_service
+            .add(mac)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+
+    // Expired historical row still referenced by the LIVE key of
+    // `live_mac` (synthetic state: the guard must hold regardless).
+    let referenced_value = [7; 32];
+    sqlx::query("INSERT INTO historical_keys (value, expire_at) VALUES (?, ?)")
+        .bind(referenced_value.to_vec())
+        .bind(Utc::now() - Duration::hours(1))
+        .execute(&*connection.primary_db_client())
+        .await?;
+    sqlx::query("INSERT INTO keys (value, expire_at, mac) VALUES (?, ?, ?)")
+        .bind(referenced_value.to_vec())
+        .bind(Utc::now() + Duration::hours(1))
+        .bind(live_mac)
+        .execute(&*connection.primary_db_client())
+        .await?;
+
+    // Expired historical row referenced by no key at all.
+    let orphan_value = [8; 32];
+    sqlx::query("INSERT INTO historical_keys (value, expire_at) VALUES (?, ?)")
+        .bind(orphan_value.to_vec())
+        .bind(Utc::now() - Duration::hours(1))
+        .execute(&*connection.primary_db_client())
+        .await?;
+
+    // The rotation must not error, must delete the unreferenced expired
+    // row and must keep the referenced one.
+    let _ = service.add([9; 32], rotating_mac).await?;
+
+    let referenced_left =
+        sqlx::query_as::<_, HistoricalKey>("SELECT * FROM historical_keys WHERE value = ?")
+            .bind(referenced_value.to_vec())
+            .fetch_optional(&*connection.primary_db_client())
+            .await?;
+    assert!(
+        referenced_left.is_some(),
+        "the historical key referenced by a live key must survive the purge"
+    );
+    let orphan_left =
+        sqlx::query_as::<_, HistoricalKey>("SELECT * FROM historical_keys WHERE value = ?")
+            .bind(orphan_value.to_vec())
+            .fetch_optional(&*connection.primary_db_client())
+            .await?;
+    assert!(
+        orphan_left.is_none(),
+        "the expired unreferenced historical key must be purged"
+    );
+    // The referencing live key itself must be untouched by the purges.
+    let live_key_left = sqlx::query("SELECT 1 FROM keys WHERE mac = ?")
+        .bind(live_mac)
+        .fetch_optional(&*connection.primary_db_client())
+        .await?;
+    assert!(
+        live_key_left.is_some(),
+        "the live key must not be affected by the retention purges"
+    );
+    Ok(())
+}
+
+/// Regression: a sensor offline for more than the 30-day historical
+/// retention window leaves an expired key row whose historical row is
+/// expired too. The unguarded historical purge used to delete that
+/// referenced row, violating `keys.value -> historical_keys.value` and
+/// aborting EVERY subsequent rotation (key-rotation denial of service).
+/// The rotation of another sensor must now succeed: the expired key row is
+/// purged first, its anti-replay nonces cascade away
+/// (`nonces.mac -> keys.mac` ON DELETE CASCADE), the orphaned historical
+/// row becomes unreferenced and is purged, and the rotating sensor gets
+/// its new key and historical row.
+#[tokio::test]
+async fn test_add_key_rotation_succeeds_with_offline_sensor_orphan() -> anyhow::Result<()> {
+    use chrono::{Duration, Utc};
+
+    let connection = Connection::new().await?;
+    let service = KeyService::new(connection.clone());
+    let sensor_service = SensorService::new(connection.clone());
+    let nonce_service = NonceService::new(connection.clone());
+
+    // The long-offline sensor: its key expired 31 days ago and its
+    // historical row (30-day retention) expired as well. One nonce is
+    // attached to that key row to pin the cascade.
+    let offline_mac = "AA:BB:26:06:19:D1";
+    let rotating_mac = "AA:BB:26:06:19:D2";
+    for mac in [offline_mac, rotating_mac] {
+        let _ = sensor_service
+            .add(mac)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+    let orphan_value = [31; 32];
+    sqlx::query("INSERT INTO historical_keys (value, expire_at) VALUES (?, ?)")
+        .bind(orphan_value.to_vec())
+        .bind(Utc::now() - Duration::days(31))
+        .execute(&*connection.primary_db_client())
+        .await?;
+    sqlx::query("INSERT INTO keys (value, expire_at, mac) VALUES (?, ?, ?)")
+        .bind(orphan_value.to_vec())
+        .bind(Utc::now() - Duration::days(31))
+        .bind(offline_mac)
+        .execute(&*connection.primary_db_client())
+        .await?;
+    let _ = nonce_service.add([55; 12], offline_mac).await?;
+
+    // Another sensor rotates: before the dependency-safe ordering this
+    // aborted on the foreign-key violation.
+    let new_key = service.add([41; 32], rotating_mac).await?;
+
+    // The expired orphan key row is gone and its nonce cascaded with it.
+    let orphan_key_left = sqlx::query("SELECT 1 FROM keys WHERE mac = ?")
+        .bind(offline_mac)
+        .fetch_optional(&*connection.primary_db_client())
+        .await?;
+    assert!(
+        orphan_key_left.is_none(),
+        "the offline sensor's expired key row must be purged by the rotation"
+    );
+    let nonce_left = sqlx::query("SELECT 1 FROM nonces WHERE mac = ?")
+        .bind(offline_mac)
+        .fetch_optional(&*connection.primary_db_client())
+        .await?;
+    assert!(
+        nonce_left.is_none(),
+        "the offline sensor's nonces must cascade away with its key row"
+    );
+    // The orphaned historical row became unreferenced and was purged.
+    let orphan_historical =
+        sqlx::query_as::<_, HistoricalKey>("SELECT * FROM historical_keys WHERE value = ?")
+            .bind(orphan_value.to_vec())
+            .fetch_optional(&*connection.primary_db_client())
+            .await?;
+    assert!(
+        orphan_historical.is_none(),
+        "the orphaned expired historical key must be purged once unreferenced"
+    );
+    // The rotating sensor holds its new key and the rotation's historical
+    // row exists.
+    assert!(new_key.id > 0);
+    let new_historical =
+        sqlx::query_as::<_, HistoricalKey>("SELECT * FROM historical_keys WHERE value = ?")
+            .bind(new_key.value.clone())
+            .fetch_optional(&*connection.primary_db_client())
+            .await?;
+    assert!(
+        new_historical.is_some(),
+        "the rotation's historical key row must exist"
     );
     Ok(())
 }

@@ -140,7 +140,12 @@ impl std::fmt::Display for ProductType {
 pub struct Sensor {
     /// Unique identifier for the sensor.
     pub id: u32,
-    /// MAC address of the sensor.
+    /// MAC address of the sensor. The format (six hexadecimal pairs
+    /// separated by `:`, case-insensitive) is enforced at
+    /// deserialization: the fields are public, so constructor-side
+    /// checks alone would be bypassable by deserializing an untrusted
+    /// payload.
+    #[serde(deserialize_with = "crate::common::helpers::mac::deserialize")]
     pub mac: String,
     /// Current status of the sensor.
     pub status: Status,

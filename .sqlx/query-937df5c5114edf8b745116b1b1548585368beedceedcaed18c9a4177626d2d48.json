@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT is_used, expire_at FROM refresh_tokens WHERE user_id = ? AND token = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "is_used",
+        "ordinal": 0,
+        "type_info": "Bool"
+      },
+      {
+        "name": "expire_at",
+        "ordinal": 1,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "937df5c5114edf8b745116b1b1548585368beedceedcaed18c9a4177626d2d48"
+}

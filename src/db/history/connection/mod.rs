@@ -1,7 +1,8 @@
 use crate::common::helpers::config::HomeIotConfig;
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use influxdb2::Client;
 use std::time::Duration;
+use url::Url;
 
 /// Initializes and returns a time-series database client.
 ///
@@ -15,11 +16,18 @@ use std::time::Duration;
 /// # Configuration File Fields
 ///
 /// * `history_db_url` - Database server URL (for example
-///   "http://localhost:8086")
+///   "http://localhost:8086"). Policy: `https` is always accepted; plain
+///   `http` is only accepted for loopback hosts (localhost, 127.0.0.1,
+///   ::1) or when `history_db_allow_insecure` is explicitly true in the
+///   configuration file (for Docker-internal or private-LAN gateways);
+///   any other scheme, or a malformed URL, is rejected.
 /// * `history_db_org` - Organization name
 /// * `history_db_token` - Authentication token
 /// * `bucket_name` - InfluxDB bucket that history writes target (optional,
 ///   defaults to "test_bucket" when absent)
+/// * `history_db_allow_insecure` - Explicit opt-in to `http://` against a
+///   non-loopback host (optional, defaults to false; traffic is then
+///   unencrypted on the wire, so set it only where that is understood)
 ///
 /// # Returns
 ///
@@ -60,6 +68,36 @@ pub(crate) async fn get_time_series_database_client(
     // events behind a stuck write. Connect failures surface within the
     // connect window; a server that accepts but never answers is cut off
     // by the overall request timeout.
+    let is_loopback_host = |host: &str| -> bool {
+        // Loopback names and literals: the standard cases a local InfluxDB
+        // dev instance uses.
+        host == "localhost" || host == "127.0.0.1" || host == "::1"
+    };
+    // TLS transport policy: refuse to send the bearer token over plain
+    // `http` except to a loopback host or on explicit configuration opt-in
+    // (CWE-319). Parsing goes through the `url` crate — no hand-rolled URL
+    // handling; anything unparsable or with an unexpected scheme is
+    // rejected with an actionable message.
+    let parsed =
+        Url::parse(&url).with_context(|| format!("history_db_url is not a valid URL: {url}"))?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" => {
+            let loopback = parsed.host_str().map(is_loopback_host).unwrap_or(false);
+            let allowed = loopback || config.history_db_allow_insecure();
+            if !allowed {
+                bail!(
+                    "history_db_url must use https for non-loopback hosts \
+                     (CWE-319: credentials over unencrypted http); set \
+                     history_db_allow_insecure=true in the configuration \
+                     file to explicitly accept plain http"
+                );
+            }
+        }
+        // Everything else (ftp:, file:, empty scheme, garbage) is outside
+        // the expected transport; fail loudly instead of guessing.
+        other => bail!("history_db_url must use the http or https scheme, got '{other}'"),
+    }
     let client = influxdb2::ClientBuilder::with_builder(
         reqwest::ClientBuilder::new()
             .connect_timeout(connect_timeout)

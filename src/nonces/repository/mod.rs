@@ -26,6 +26,9 @@ impl NonceRepository {
     /// it and was removed by a table-rebuild migration) surface as
     /// `CommonError::UniqueViolation`; foreign-key failures (unknown MAC)
     /// keep the underlying sqlx error inside the generic `Database` variant.
+    /// The nonce service maps the `nonces.value` unique violation to the
+    /// typed `NonceError::ReplayDetected` outcome; this layer stays
+    /// `CommonError`-only.
     pub(crate) async fn insert(&self, nonce: &Nonce) -> Result<u32> {
         let value = nonce.value.to_vec();
         let result = sqlx::query!(

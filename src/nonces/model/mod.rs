@@ -16,7 +16,11 @@ pub struct Nonce {
     pub id: u32,
     /// Nonce value as a byte vector (12 bytes).
     pub value: Vec<u8>,
-    /// sensor mac.
+    /// Sensor mac. The format (six hexadecimal pairs separated by `:`,
+    /// case-insensitive) is enforced at deserialization: the fields are
+    /// public, so constructor-side checks alone would be bypassable by
+    /// deserializing an untrusted payload.
+    #[serde(deserialize_with = "crate::common::helpers::mac::deserialize")]
     pub mac: String,
 }
 

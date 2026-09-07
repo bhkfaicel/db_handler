@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM keys WHERE expire_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b832d399ee1c0a980704515c857de944d22cd38c2f92b0c47dbcb64209c42185"
+}

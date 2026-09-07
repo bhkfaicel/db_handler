@@ -11,6 +11,19 @@ pub enum NonceError {
     /// Invalid nonce value.
     #[error("Invalid nonce value: expected 12 bytes, got {0} bytes")]
     InvalidValue(usize),
+
+    /// Invalid MAC address format. The ledger only accepts six
+    /// hexadecimal pairs separated by `:` (case-insensitive); anything
+    /// else is refused before any database work happens.
+    #[error("Invalid MAC address format: {0}")]
+    InvalidMacFormat(String),
+
+    /// The presented nonce value was already accepted before, whatever the
+    /// sensor that now presents it: the database `UNIQUE(value)` constraint
+    /// rejected the INSERT. This is the anti-replay ledger working as
+    /// intended (the value is burned), not an infrastructure failure.
+    #[error("Nonce replay detected: value already accepted")]
+    ReplayDetected,
 }
 
 /// Result type for nonce operations.

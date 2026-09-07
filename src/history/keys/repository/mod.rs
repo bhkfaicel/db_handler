@@ -63,15 +63,29 @@ impl HistoricalKeyRepository {
     /// purpose: it would cost one extra B-tree write per insert to
     /// accelerate a scan that stays negligible. Revisit only with a
     /// measured regression.
+    ///
+    /// The `NOT EXISTS` guard is the foreign-key safety belt:
+    /// `keys.value` references `historical_keys.value` with NO ACTION, so
+    /// deleting a historical row still referenced by a key row would abort
+    /// the whole purge with a foreign-key violation. The guard skips any
+    /// expired row still referenced by a LIVE key; such a row becomes
+    /// unreferenced — and therefore purgeable — once that key expires and
+    /// the expired-keys purge (which runs first in the rotation
+    /// transaction) removes it. With this guard no statement order can
+    /// orphan a referenced row.
     pub(crate) async fn delete_expired_with_transaction(
         &self,
         tx: &mut Transaction<'_, sqlx::Sqlite>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        sqlx::query!("DELETE FROM historical_keys WHERE expire_at < ?", now)
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_to_common_error)?;
+        sqlx::query!(
+            "DELETE FROM historical_keys WHERE expire_at < ? \
+             AND NOT EXISTS (SELECT 1 FROM keys WHERE keys.value = historical_keys.value)",
+            now
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
         Ok(())
     }
 }

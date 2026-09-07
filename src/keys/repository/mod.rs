@@ -52,6 +52,28 @@ impl KeyRepository {
         Ok(())
     }
 
+    /// Delete every expired key row within the caller's transaction.
+    ///
+    /// Expired keys are unusable (every lookup filters on `expire_at`), so
+    /// purging them on the next rotation of any sensor keeps the table
+    /// bounded without a dedicated sweeper. The deletion is
+    /// dependency-sensitive and MUST run before the historical-keys purge:
+    /// the foreign-key chain is `keys.value -> historical_keys.value`
+    /// (NO ACTION — a referenced historical row cannot be deleted while a
+    /// key row references it) and `nonces.mac -> keys.mac ON DELETE
+    /// CASCADE` (each key's anti-replay nonces leave with it).
+    pub(crate) async fn delete_expired_with_transaction(
+        &self,
+        tx: &mut Transaction<'_, sqlx::Sqlite>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query!("DELETE FROM keys WHERE expire_at < ?", now)
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
+
     pub(crate) async fn get_by_mac(&self, mac: &str) -> Result<Option<Key>> {
         let now = chrono::Utc::now();
         let result = sqlx::query!(

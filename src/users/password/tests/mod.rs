@@ -1,9 +1,31 @@
 //! Tests for the users-domain password helpers, relocated with the code
 //! they cover.
 
-use super::{hash_password, hash_password_async, verify_password, verify_password_async};
+use super::{
+    hash_password, hash_password_async, verify_password, verify_password_async, DUMMY_BCRYPT_HASH,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+// The login lookup verifies unknown emails against DUMMY_BCRYPT_HASH to
+// equalize bcrypt CPU cost across branches (no timing oracle). This test
+// pins the two properties that make that work: the constant is a real
+// cost-12 bcrypt hash (same `$2b$12$` cost policy as stored password
+// hashes), and verifying a wrong password against it returns Ok(false) —
+// which bcrypt can only answer after actually running the key-derivation
+// over the dummy hash. So whenever the repository's unknown-email branch
+// completes, real bcrypt work has provably happened.
+#[test]
+fn test_dummy_hash_is_valid_at_default_cost_and_rejects_passwords() {
+    assert!(
+        DUMMY_BCRYPT_HASH.starts_with("$2b$12$"),
+        "dummy hash must carry the same cost policy as stored hashes"
+    );
+    assert!(
+        !verify_password("definitely-not-the-dummy-source", DUMMY_BCRYPT_HASH).unwrap(),
+        "no realistic password may verify against the dummy hash"
+    );
+}
 
 #[test]
 fn test_hash_password() {

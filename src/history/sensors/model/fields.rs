@@ -39,18 +39,34 @@ pub struct VibrationCount {
 /// are not indexed and can change frequently. Different sensor types
 /// will have different field structures.
 ///
+/// Field rendering happens exclusively through InfluxDB's
+/// `DataPoint::builder` (the write path in this crate), which handles
+/// the line-protocol quoting and escaping of field values.
+///
 /// # Example
 ///
+/// Add the measured values exactly like the write path does:
+///
 /// no_run
+///
+/// ```
 /// use db_handler::history::sensors::model::fields::SensorFields;
+/// use influxdb2::models::{DataPoint, FieldValue};
 ///
 /// // For a contact sensor
 /// let fields = SensorFields::Contact {
 ///     is_open: true,
 ///     vibration_count: None,
+///     sensor_timestamp: None,
 /// };
 ///
-///
+/// let mut builder = DataPoint::builder("sensor_data");
+/// if let SensorFields::Contact { is_open, .. } = fields {
+///     builder = builder.field("is_open", FieldValue::from(is_open));
+/// }
+/// let point = builder.build().expect("a valid data point");
+/// let _ = point;
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SensorFields {
     /// Fields for contact sensors (open/close detection)
@@ -62,56 +78,4 @@ pub enum SensorFields {
         /// Optional sensor timestamp
         sensor_timestamp: Option<DateTime<Utc>>,
     },
-}
-
-impl SensorFields {
-    /// Converts fields to Line Protocol format (compatible with InfluxDB).
-    ///
-    /// # Returns
-    ///
-    /// A string in the format: `is_open=true` or `is_open=false`
-    ///
-    /// # Example
-    ///
-    /// no_run
-    ///
-    /// # use db_handler::history::sensors::model::fields::SensorFields;
-    ///
-    /// let fields = SensorFields::Contact {
-    ///     is_open: true,
-    ///     vibration_count: None,
-    /// };
-    /// # let fields = SensorFields::Contact {
-    /// #     is_open: true,
-    /// #     vibration_count: None,
-    /// # };
-    /// # let line_protocol = fields.to_line_protocol();
-    /// # assert_eq!(line_protocol, "is_open=true");
-    /// #
-    pub fn to_line_protocol(&self) -> String {
-        match self {
-            SensorFields::Contact {
-                is_open,
-                vibration_count,
-                sensor_timestamp,
-            } => {
-                let mut parts = vec![format!(
-                    "is_open={}",
-                    if *is_open { "true" } else { "false" }
-                )];
-                if let Some(vc) = vibration_count {
-                    parts.push(format!("vibration_count={}", vc.count));
-                    parts.push(format!("vibration_time_window={}", vc.time_window));
-                    parts.push(format!("vibration_time_unit=\"{}\"", vc.unit));
-                }
-                if let Some(timestamp) = sensor_timestamp {
-                    parts.push(format!(
-                        "sensor_timestamp={}",
-                        timestamp.timestamp_nanos_opt().unwrap_or(0)
-                    ));
-                }
-                parts.join(",")
-            }
-        }
-    }
 }

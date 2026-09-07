@@ -24,7 +24,8 @@ fn contact_point(timestamp: DateTime<Utc>) -> SensorDataPoint {
         ProductType::ContactSensor,
         1,
         "AA:BB:CC:DD:EE:FF".to_string(),
-    );
+    )
+    .expect("a well-formed MAC must be accepted");
     let fields = SensorFields::Contact {
         is_open: true,
         vibration_count: None,

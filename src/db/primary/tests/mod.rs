@@ -684,18 +684,13 @@ async fn migrations_apply_exactly_once_across_boots() -> Result<()> {
         ),
     )?;
 
-    // Environment variables are process-global: save and restore so this
-    // test cannot poison later ones (single-threaded suite).
-    let original = env::var("CONFIG_FILE").ok();
-    env::set_var("CONFIG_FILE", &config_path);
+    // Environment variables are process-global: take the shared test guard
+    // (it serializes access across parallel tests and restores the previous
+    // value on drop).
+    let guard = crate::test_env::ConfigFileGuard::acquire();
+    guard.set(Some(config_path.to_str().unwrap()));
 
-    let cleanup = |original: &Option<String>| {
-        match original {
-            Some(v) => env::set_var("CONFIG_FILE", v),
-            None => {
-                env::remove_var("CONFIG_FILE");
-            }
-        }
+    let _cleanup = || {
         let _ = std::fs::remove_file(&config_path);
         let _ = std::fs::remove_file(&db_path);
     };
@@ -748,6 +743,7 @@ async fn migrations_apply_exactly_once_across_boots() -> Result<()> {
 
     drop(pool);
     drop(connection);
-    cleanup(&original);
+    drop(guard); // restore the previous CONFIG_FILE value
+    _cleanup(); // remove the temporary files
     Ok(())
 }

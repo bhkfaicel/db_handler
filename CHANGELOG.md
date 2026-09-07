@@ -7,8 +7,25 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-07
+
 ### Breaking
 
+- The refresh-token consumption API is replaced by atomic rotation
+  (APPLIED): `RefreshTokenService::is_valid` and
+  `RefreshTokenService::update_flag_by_token` are removed, along with the
+  repository lookup and flag-update methods that only served them
+  (`get_by_user_id_and_token`, `update_flag_by_token`). The new
+  `RefreshTokenService::rotate(user_id, old_token, new_token, expire_at,
+created_at)` consumes the presented token and inserts its replacement in
+  ONE database transaction and returns a typed `RotationOutcome`
+  (`Rotated(RefreshToken)`, `NotFound`, `Expired`, `ReuseDetected`). The
+  former read-then-flag two-step flow left a replay window between the
+  validity check and the consumption; a replay of an already-consumed token
+  now atomically deletes every token of the user and reports
+  `ReuseDetected`. The verified caller (the `backend` refresh controller)
+  is migrated to the single `rotate` call; refresh-token issuers keep using
+  `add` unchanged.
 - The previously no-op `sensors` and `users` cargo features are now real
   gates (APPLIED): a default-features build compiles only the core modules
   (`common`, `db`, `drives`). The `sensors` feature gates `sensors`,
@@ -66,9 +83,42 @@ and this project adheres to semantic versioning.
   The core test modules exercising the pagination infrastructure carry the
   same feature gate as the infrastructure itself, so test compilation with
   default features (where the gated items do not exist) skips them.
+- Refresh tokens are stored as SHA-256 digests, never as plaintext
+  (APPLIED): the repository boundary hashes every caller-supplied token
+  value before it reaches SQL on every store and lookup path (insertion,
+  rotation consumption, rotation classification and replacement insert), so
+  a database read alone no longer yields a usable session. The `token`
+  field of the returned `RefreshToken` model keeps echoing the
+  caller-supplied value; no public getter returns stored digests, and
+  callers keep passing the plaintext token string to `add` and `rotate`
+  (their signatures are unchanged). **Existing sessions are invalidated:
+  every currently issued refresh token stops authenticating after this
+  change and all users must log in again.** There is no legacy-row
+  migration (a database row holding a plaintext token can no longer match
+  its digest); a one-shot legacy-row hashing sweep remains available as a
+  follow-up for deployments that want to preserve sessions. Presenting a
+  digest read from the database as a token fails (it is hashed again before
+  matching), and token issuers MUST supply values with at least 256 bits of
+  cryptographic unpredictability (documented contract on
+  `RefreshTokenService::add`/`rotate`; the backend's signing-key entropy
+  and token uniqueness remain a coordination item to qualify).
 
 ### Added
 
+- Optional `history_db_allow_insecure` configuration field (serde default
+  false): the history database client now enforces encrypted transport —
+  `https://` URLs are always accepted, and plain `http://` is only accepted
+  for loopback hosts (`localhost`, `127.0.0.1`, `::1`) unless this flag is
+  explicitly set true (for Docker-internal hostnames or private-LAN
+  gateways where unencrypted traffic is understood and accepted; traffic
+  then carries the bearer token in cleartext on the wire). Any other URL
+  scheme, or a malformed URL, is rejected with an actionable error before
+  any client is built. URLs are parsed with the `url` crate. The default
+  (flag absent) rejects non-loopback `http` — no existing configuration
+  silently downgrades. `config.example.json` documents the field, and the
+  transport policy is covered by dedicated tests (rejection without opt-in,
+  acceptance with opt-in, loopback and https acceptance, malformed URL
+  rejection).
 - Public `RefreshTokenService::cleanup_expired()` hook that deletes every
   expired refresh token across all users in one call, for boot-time or
   operator-triggered sweeps. It is deliberately caller-dependent — the
@@ -122,6 +172,20 @@ and this project adheres to semantic versioning.
 
 ### Changed
 
+- The canonical test configuration (`config.test.json`) sets
+  `history_db_allow_insecure` true: its history URL targets the
+  Docker-internal `influxdb` hostname, which is not a loopback host and is
+  therefore subject to the new encrypted-transport policy. The flag is
+  scoped to this test-only configuration file and does not change the
+  library's default behavior (test-only configuration change, deliberate).
+- The refresh-token retention purge is now expired-only (APPLIED): the
+  per-user purge on the issuance path and at the end of the rotation
+  transaction deletes rows whose `expire_at` passed, and no longer deletes
+  already-used rows. Consumed tokens are retained until their natural
+  expiry, so a replay keeps classifying as `ReuseDetected` for the token's
+  full lifetime, while per-user storage stays bounded by the expiry window
+  instead of growing with the number of rotations. The global
+  `cleanup_expired` sweep was already expired-only and is unchanged.
 - The redundant composite `UNIQUE (value, mac)` constraint on the `nonces`
   table is removed by a new migration that rebuilds the table: the
   column-level `UNIQUE` on `value` is strictly stronger (it rejects a
@@ -152,8 +216,8 @@ and this project adheres to semantic versioning.
   scan of that bounded table, so no index on `expire_at` is added on
   purpose (one extra B-tree write per insert to accelerate a negligible
   scan is a documented ceiling) — and refresh-token issuance
-  (`RefreshTokenService::add`) now deletes the user's expired and
-  already-used tokens before inserting the new one, riding the existing
+  (`RefreshTokenService::add`) now deletes the user's expired tokens
+  before inserting the new one, riding the existing
   per-user index. Tokens of users who never log in again are covered by
   the added `cleanup_expired` hook instead (see above). No existing
   rotation or issuance semantics changed beyond the added purges.
@@ -206,20 +270,22 @@ and this project adheres to semantic versioning.
   surfacing as the public `RefreshTokenError::AlreadyExists` variant, now
   pinned by a new typed service test asserting the variant instead of
   message text; every other database failure passes through unchanged in
-  the transparent `Common` variant. No public error variant changed; all
-  other refresh-token behavior is unchanged.
+  the transparent `Common` variant. This intermediate structured
+  conversion introduced no public variant change of its own; this
+  release's broader refresh-token changes (the removed two-step
+  consumption flow and the atomic `rotate` API) appear under the breaking
+  section above.
 - The nonces module follows the same structured error flow:
   `NonceRepository` methods return the shared `CommonError` instead of raw
   `sqlx::Error`, and `NonceService` maps failures to `NonceError` through
   the existing conversion, so the local sqlx-to-domain mapper helper is
-  deleted. Duplicate-nonce detection surfaces as the structured
+  deleted. Duplicate-nonce detection first surfaced as the structured
   `UniqueViolation` variant (constraint identity as reported by SQLite for
   the violated index) carried by the transparent `Common` variant of
-  `NonceError`: new tests pin the typed behavior at both the repository and
-  the service level, and the former raw-sqlx duplicate/foreign-key
-  assertions now target the structured variants with the original violation
-  kinds preserved. No public error variant changed; all other nonce
-  behavior is unchanged.
+  `NonceError`, and this release's final state consolidates it further
+  into the public `NonceError::ReplayDetected` variant (see the changed
+  entry below): the former raw-sqlx duplicate/foreign-key assertions now
+  target the typed variants with the original violation kinds preserved.
 - The users module follows the same structured error flow:
   `UserRepository` methods return the shared `CommonError` instead of
   `anyhow` errors, and `UserService` maps failures to `UserError` without
@@ -229,8 +295,8 @@ and this project adheres to semantic versioning.
   `UserError::EmailAlreadyExists` variant at the service level. The former
   message-string mapper, the dead email-extraction helper and the anyhow
   downcast boilerplate are deleted; the repository-level duplicate-email
-   assertion now targets the typed variant instead of matching message text.
-   All other user behavior is unchanged.
+  assertion now targets the typed variant instead of matching message text.
+  All other user behavior is unchanged.
 - Password hashing moved out of the data-access layer into the user
   service: `UserService::update_by_id` now bcrypt-hashes the clear password
   before calling the repository, and the crate-internal
@@ -274,12 +340,12 @@ and this project adheres to semantic versioning.
   plus a `tests/` directory containing `mod.rs`): the 17 modules that kept
   their tests in a single `tests.rs` file were converted to a `tests/`
   directory with no code change (Rust module declarations resolve both
-forms). The two empty one-line placeholder test files in the
-   `db::history` tree (zero tests, fake coverage) are removed with the
-   modules they nominally covered (see the deleted `BucketName` enum and
-   history constructor traits above); the default-bucket behavior is
-   pinned by the dedicated configuration test (see the added optional
-   `bucket_name` field). No test was weakened or skipped by this change.
+  forms). The two empty one-line placeholder test files in the
+  `db::history` tree (zero tests, fake coverage) are removed with the
+  modules they nominally covered (see the deleted `BucketName` enum and
+  history constructor traits above); the default-bucket behavior is
+  pinned by the dedicated configuration test (see the added optional
+  `bucket_name` field). No test was weakened or skipped by this change.
 - Sort-key validation in the crate-internal pagination helper
   (`get_paginated_results_by_string`) no longer issues a per-call
   `PRAGMA table_info` round-trip: the sort key is checked against the
@@ -290,11 +356,11 @@ forms). The two empty one-line placeholder test files in the
   One behavioral consequence: sorting by a column that exists in the table
   but is absent from the model's mapped columns is now rejected instead of
   being silently allowed, and the dedicated core test pins that rejection.
-   A dedicated core test passes a sort key absent from the model's columns
-   (`not_a_column`) over an otherwise valid model and asserts the explicit
-   "Invalid sort key" error, directly proving the `ORDER BY` whitelist.
-   The now-unused PRAGMA-based column introspection helper is deleted
-   together with its core-only dead-code warning.
+  A dedicated core test passes a sort key absent from the model's columns
+  (`not_a_column`) over an otherwise valid model and asserts the explicit
+  "Invalid sort key" error, directly proving the `ORDER BY` whitelist.
+  The now-unused PRAGMA-based column introspection helper is deleted
+  together with its core-only dead-code warning.
 - The file-based primary SQLite database now runs in WAL journal mode: the
   connect options set `journal_mode` to WAL, so readers work on snapshots
   and no longer queue behind a committing writer (in the previous
@@ -325,6 +391,25 @@ forms). The two empty one-line placeholder test files in the
   user creation and update in the user service. Return values and error
   variants are unchanged; the synchronous primitives remain for non-async
   reuse and unit tests.
+- Duplicate nonce inserts now surface as a dedicated
+  `NonceError::ReplayDetected` variant instead of
+  `NonceError::Common(CommonError::UniqueViolation)` (APPLIED): replay
+  detection is enforced by the database itself — the column-level
+  `UNIQUE(value)` constraint rejects an already-accepted value inside the
+  INSERT, so concurrent writers get exactly one acceptance with no racy
+  SELECT-then-INSERT probe. `NonceService::add` keeps its signature and
+  still returns the stored record on success; only the duplicate error
+  path changes shape, so callers matching on the wrapped unique violation
+  for duplicates must match `NonceError::ReplayDetected` instead. The
+  ledger contract is now documented on the module and the service: a
+  nonce value is burned GLOBALLY once accepted (the same value is refused
+  whatever sensor presents it — the validated strictly-stronger
+  anti-replay semantics of the single `UNIQUE(value)` schema; with 96-bit
+  values a cross-sensor collision is practically unreachable), accepted
+  rows are never deleted on verification, and they leave the ledger only
+  through the foreign-key cascade when the sensor's key row is deleted at
+  key rotation, keeping ledger growth bounded by the key-rotation window;
+  there is deliberately no explicit purge method.
 
 ### Removed
 
@@ -358,12 +443,36 @@ forms). The two empty one-line placeholder test files in the
   runner (nextest, no strict error handling) inside `src/`; the canonical
   test gate is `scripts/test.sh`. The stale `tests1/*` entry is removed
   from `.gitignore`.
+- The hand-written InfluxDB line-protocol formatters
+  (`SensorDataPoint::to_line_protocol`, `SensorTags::to_line_protocol`,
+  `SensorFields::to_line_protocol`): they escaped the `:` separator of MAC
+  addresses, which line protocol does not treat as special, while leaving
+  the actually special characters (`\`, `,`, `=`, space) unescaped, so any
+  value carrying those would have corrupted the written line. The live
+  write path never used them: it builds points through
+  `influxdb2::models::DataPoint::builder`, which performs the correct
+  escaping. The formatters were reachable only from documentation examples
+  (their modules are crate-private in release builds), and those examples
+  now demonstrate `DataPoint::builder` instead. No in-tree or out-of-tree
+  caller existed.
 
 ### Fixed
 
+- Flaky parallel test runs eliminated by isolating the process-global
+  `CONFIG_FILE` environment variable in tests: a std-only mutex-guarded
+  helper (`src/test_env.rs`, compiled only for tests) serializes every test
+  that points the config loader at a temporary file and restores the
+  previous value automatically on drop, so running
+  `cargo test --locked --no-default-features` with the default parallel
+  threads no longer races between the file-pragma and history-timeout /
+  policy tests. The history-policy tests additionally use distinct
+  temporary config file names per security-flag variant so parallel
+  executions cannot overwrite each other's configuration files. No
+  production code is affected; the core-only suite now passes
+  deterministically in parallel mode.
 - Test code cleanup so the full lint gate passes on all targets
   (`cargo clippy --locked --all-targets --features sensors,users,utoipaDoc
-  -- -D warnings`): compound assignment operators replace manual
+-- -D warnings`): compound assignment operators replace manual
   add/subtract operations, `clone()` calls removed on `Copy` key arrays,
   shorthand struct field initialization, `assert!` instead of
   `assert_eq!(..., true/false)`, unit-value `let` bindings removed,
@@ -414,6 +523,100 @@ forms). The two empty one-line placeholder test files in the
   `tests/mod.rs` layout.
 - The migrations README file table now lists the two migrations added by the
   performance work (duplicate refresh-token index drop, nonces rebuild).
+- Key-rotation denial of service through the retention purge: a sensor
+  offline for more than the 30-day historical-key window kept an expired
+  key row whose historical row had also expired, and the historical purge
+  inside the rotation transaction deleted that referenced row, violating
+  the `keys.value` -> `historical_keys.value` foreign key and aborting
+  every subsequent rotation of every sensor. The rotation transaction now
+  purges expired key rows first (they are unusable, and their anti-replay
+  nonces leave through the `nonces.mac` -> `keys.mac` cascade), then
+  purges expired historical keys with a `NOT EXISTS` guard that never
+  deletes a row still referenced by a live key, so no statement order can
+  orphan a referenced row. The resulting retention contract is documented
+  on the rotation path: expired key rows leave at the next rotation of
+  any sensor, historical keys follow once unreferenced, nonces cascade
+  when their key row goes. Regression tests cover the offline-sensor
+  scenario, the cascade and the guard.
+- Secret redaction for the secret-bearing data types: the derived `Debug`
+  output printed secrets in full and derived serialization carried them
+  into any serialized form. `HomeIotConfig` (history-database token),
+  `RefreshToken` (token value), `Key` and `HistoricalKey` (raw key bytes)
+  and the crate-internal `InternalUser` (password hash) now render the
+  secret through a hand-written `Debug` impl as a fixed `[REDACTED]`
+  marker: every other field keeps its readable rendering, and the presence
+  of a password hash stays visible. Serialization skips the secret field
+  while deserialization keeps accepting a complete payload, so
+  serializing these models is intentionally lossy for the secret (no
+  serialize -> deserialize round trip reproduces it); no caller serializes
+  any of these models. The documentation examples no longer demonstrate
+  printing whole secret-bearing values. Per-type tests pin that neither
+  `Debug` output nor the serialized form contains the secret.
+- Login timing no longer leaks which emails are registered (timing-based
+  user enumeration, CWE-208): `UserRepository::get_by_email_and_password`
+  now runs the bcrypt verification on every login attempt. When the email
+  is unknown, the presented password is verified against a fixed dummy
+  bcrypt hash generated at the same default cost as real stored hashes, so
+  the unknown-email branch burns the same CPU as the wrong-password branch
+  and response time cannot distinguish the two. The verification keeps
+  running off the async runtime through the shared password helper, and the
+  function still returns no user for any failing combination. A dedicated
+  test pins that the dummy constant is a real cost-12 hash rejecting
+  passwords, and the unknown-email path is covered deterministically.
+- Registry token handling in the Docker test image: the preferred
+  mechanism is a BuildKit secret mount (`docker-compose.test.yml` passes
+  the token from the environment as a build-time secret and the dependency
+  prebuild consumes it through a scoped `RUN --mount=type=secret`), an
+  ephemeral per-build value that never lands in image layers or build
+  history. Compose no longer passes the token through `build.args` by
+  default: a plain build argument would preserve the exposure in build
+  metadata and provenance. The Dockerfile `ARG
+CARGO_REGISTRIES_FORGEJO_TOKEN` remains ONLY as a MANUAL non-BuildKit
+  fallback, a human passing it explicitly (e.g. `docker build
+--build-arg ...`) for legacy runners outside Compose — an explicitly
+  UNRESOLVED residual risk: the token scope in the Forgejo UI is still
+  UNVERIFIED (no privilege assumption is documented); severity stays LOW
+  only once the user confirms a package-read-only token.
+- The Docker test stack now runs as a dedicated non-root user instead of
+  root: `Dockerfile.test` creates the user, aligns file ownership of the
+  working directory and of the directories the compose named volumes seed
+  (the cargo registry cache and the build target), and switches to the
+  non-root user well before the dependency prebuild, so the container
+  command executes unprivileged. The cargo home configuration is also
+  unified: the image no longer points `CARGO_HOME` at `/root/.cargo`
+  while the compose cache volume mounted `/usr/local/cargo/registry`; the
+  registry config now lives under the rust image's own
+  `/usr/local/cargo`, matching the cache mount.
+
+- MAC addresses were accepted free-form, so a malformed or line-protocol-hostile
+  value could flow into key/nonce records and time-series tags. One shared
+  validator (six hexadecimal pairs separated by `:`, case-insensitive) is
+  now enforced where MACs enter the system: `SensorTags::new` (which now
+  returns a `Result` and reports
+  `SensorHistoryError::InvalidFormat`), `KeyService::add`
+  (`KeyError::InvalidMacFormat`) and `NonceService::add` (new
+  `NonceError::InvalidMacFormat` variant) refuse a malformed address
+  before any database work, and the `mac` fields of `SensorTags`, `Key`
+  and `Nonce` validate through a serde deserialization hook, closing the
+  bypass where the public fields plus derived `Deserialize` would have
+  skipped constructor checks. The sensor registration boundary is covered
+  too: the `mac` field of the `Sensor` model validates through the same
+  serde hook, and `SensorService::add` replaces its non-empty check with
+  the full format validation (`SensorError::InvalidMac`), since
+  `sensors.mac` roots the foreign-key chain (`keys.mac` ->
+  `nonces.mac`) and a hostile value there would flow into every
+  downstream record. No backend production endpoint inserts or
+  deserializes a `Sensor` payload (the backend exposes no sensor-creation
+  endpoint, and no API payload deserializes this model); the bridge
+  production paths DO call `SensorService::add`, with well-formed LoRa
+  MACs that already match the format, so they are unaffected. Out-of-tree
+  test fixtures
+  that register fake values (the backend sensor tests' placeholder MACs
+  and the bridge SIL tests' `SL:`-prefixed placeholders) will be refused
+  by the new contract and must switch to well-formed addresses at their
+  next update. Tests pin the rejections at construction and
+  deserialization (including a MAC carrying `,`, `=` and spaces), and that
+  lowercase addresses stay accepted.
 
 ## [0.2.0] - 2026-09-06
 

@@ -4,6 +4,11 @@ pub mod common;
 pub mod db;
 pub mod drives;
 
+// Test-support shared by every suite that mutates the process-global
+// `CONFIG_FILE` variable (see module docs); compiled out of non-test builds.
+#[cfg(test)]
+pub(crate) mod test_env;
+
 // Sensor domain. These four modules form one dependency closure (`history`
 // imports `sensors::model::ProductType`, `keys` imports `history::keys`,
 // `nonces` chains through `keys`), so they are gated together behind the
