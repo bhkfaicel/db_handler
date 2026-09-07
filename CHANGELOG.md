@@ -7,6 +7,36 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Public gRPC session validation and revocation on `RefreshTokenService`
+  (additive, behind the `users` feature): `add_session` stores a session
+  for a `(user_id, raw_token, expire_at, created_at)` tuple,
+  `validate_session` non-consumingly returns the owning user ID
+  (`Ok(None)` for unknown, expired or revoked sessions — fail closed),
+  `revoke_session` revokes the presented session in one atomic SQL
+  statement (idempotent: unknown, already-revoked or expired values stay
+  a no-op success), `revoke_all_sessions` revokes every session of one
+  user, and `cleanup_expired_sessions` sweeps expired session rows.
+  gRPC sessions and REST refresh tokens are now cryptographically
+  domain-separated at the storage boundary: sessions are stored under
+  the tagged digest `grpc-session:<sha256(raw)>` while refresh tokens
+  keep their bare 64-hex digests, every refresh SQL path matches only
+  refresh-domain rows and every session path only session-domain rows,
+  so the same raw value can exist in both domains as two distinct rows
+  and no refresh rotation, purge or deletion path can consume or revoke
+  a gRPC session (nor the reverse). No SQL migration was needed: the
+  tagged value fits the existing `TEXT NOT NULL UNIQUE` column. Session
+  generation remains a documented caller contract: presented values MUST
+  carry at least 256 bits of OS-CSPRNG unpredictability, and empty or
+  oversized values (over 4096 bytes) as well as a validity window where
+  `expire_at` is not strictly after `created_at` are rejected before any
+  SQL runs. Duplicate session storage surfaces as the existing
+  `RefreshTokenError::AlreadyExists` without overwriting or extending
+  the prior row; raw token values never reach SQL storage, returned
+  data, errors, logs, Debug output or serialization. Existing REST
+  refresh rotation behavior is unchanged.
+
 ### Changed
 
 - **Breaking:** user passwords are now hashed with Argon2id (RustCrypto,

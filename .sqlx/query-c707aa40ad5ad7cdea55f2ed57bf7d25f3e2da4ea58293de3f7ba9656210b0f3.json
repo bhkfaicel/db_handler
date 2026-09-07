@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id FROM refresh_tokens WHERE token = ? AND is_used = false AND expire_at > ? AND token LIKE 'grpc-session:%'",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c707aa40ad5ad7cdea55f2ed57bf7d25f3e2da4ea58293de3f7ba9656210b0f3"
+}

@@ -25,6 +25,30 @@ pub(crate) fn token_digest(token: &str) -> String {
         .collect()
 }
 
+/// Domain tag carried by every stored gRPC session digest.
+///
+/// The refresh domain stores bare 64-hex digests; the session domain
+/// stores `<tag><64-hex>`. The tag contains `:` and letters outside the
+/// hexadecimal alphabet, so a refresh digest can never equal a session
+/// value and vice versa: the stored format alone separates the two token
+/// domains, and every SQL path below enforces it with the matching
+/// `LIKE`/`NOT LIKE 'grpc-session:%'` predicate. Keep this constant and
+/// the LIKE literals inside the queries in sync.
+pub(crate) const SESSION_DIGEST_PREFIX: &str = "grpc-session:";
+
+/// Computes the domain-tagged digest of a caller-supplied session token.
+///
+/// Session counterpart of [`token_digest`]: the `grpc-session:` prefix
+/// makes a session row unmatchable by every refresh-domain path and a
+/// refresh row unmatchable by every session path, with no schema change
+/// (the `token` column stays `TEXT NOT NULL UNIQUE`, so duplicates inside
+/// one domain still surface as a unique violation while the same raw value
+/// stored in both domains yields two distinct rows). The plaintext token
+/// never reaches SQL: only this tagged digest is stored or matched.
+pub(crate) fn session_digest(token: &str) -> String {
+    format!("{SESSION_DIGEST_PREFIX}{}", token_digest(token))
+}
+
 /// Repository for performing CRUD operations on `RefreshToken` entities.
 ///
 /// All methods return `CommonError`: raw sqlx errors are converted by the
@@ -52,6 +76,10 @@ impl RefreshTokenRepository {
     /// `CommonError::UniqueViolation` (the `token` column stays UNIQUE);
     /// foreign-key failures (unknown user) keep the underlying sqlx error
     /// inside the generic `Database` variant.
+    ///
+    /// Domain scoping is by construction: the bare 64-hex digest can never
+    /// carry the `grpc-session:` tag, so this insert can never create a
+    /// session-domain row.
     pub(crate) async fn insert(&self, refresh_token: &RefreshToken) -> Result<u32> {
         // The digest is bound to a local: the query borrows its arguments.
         let digest = token_digest(&refresh_token.token);
@@ -69,10 +97,16 @@ impl RefreshTokenRepository {
         Ok(result.last_insert_rowid() as u32)
     }
     pub(crate) async fn delete_by_user_id(&self, user_id: u32) -> Result<()> {
-        sqlx::query!("DELETE FROM refresh_tokens WHERE user_id = ?", user_id)
-            .execute(&*self.pool)
-            .await
-            .map_err(map_sqlx_to_common_error)?;
+        // Refresh-domain-only predicate: session rows survive this sweep
+        // (the `user_id` filter rides the per-user index, the LIKE is a
+        // residual filter on the matched rows).
+        sqlx::query!(
+            "DELETE FROM refresh_tokens WHERE user_id = ? AND token NOT LIKE 'grpc-session:%'",
+            user_id
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
         Ok(())
     }
     /// Atomically consume `old_token` and insert `new_token` as its
@@ -124,10 +158,14 @@ impl RefreshTokenRepository {
         // the replacement is stored by digest).
         let old_digest = token_digest(old_token);
         // Conditional consumption: the row is flagged used only when it
-        // belongs to the user, matches the token, was never consumed and has
-        // not expired.
+        // belongs to the user, matches the token, was never consumed and
+        // has not expired. The digest bound to `token = ?` is a bare 64-hex
+        // value that can never equal a `grpc-session:`-tagged session row;
+        // the NOT LIKE predicate is the explicit refresh-domain guard the
+        // rest of the refresh paths carry (residual filter behind the
+        // unique-index equality lookup).
         let consumed = sqlx::query!(
-            "UPDATE refresh_tokens SET is_used = true WHERE user_id = ? AND token = ? AND is_used = false AND expire_at > ?",
+            "UPDATE refresh_tokens SET is_used = true WHERE user_id = ? AND token = ? AND is_used = false AND expire_at > ? AND token NOT LIKE 'grpc-session:%'",
             user_id,
             old_digest,
             now
@@ -166,9 +204,10 @@ impl RefreshTokenRepository {
         } else {
             // Zero-row classification, in the same transaction: the row
             // state the UPDATE saw is exactly what this SELECT sees (a
-            // single writer holds the write lock until COMMIT).
+            // single writer holds the write lock until COMMIT). The
+            // refresh-domain predicate mirrors the consumption UPDATE.
             let record = sqlx::query!(
-                "SELECT is_used, expire_at FROM refresh_tokens WHERE user_id = ? AND token = ?",
+                "SELECT is_used, expire_at FROM refresh_tokens WHERE user_id = ? AND token = ? AND token NOT LIKE 'grpc-session:%'",
                 user_id,
                 old_digest
             )
@@ -188,11 +227,17 @@ impl RefreshTokenRepository {
                         record.is_used,
                         "rotation classified an unused, unexpired token that the conditional consumption did not match"
                     );
-                    // Replay detected: delete every token of the user.
-                    sqlx::query!("DELETE FROM refresh_tokens WHERE user_id = ?", user_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_sqlx_to_common_error)?;
+                    // Replay detected: delete every REFRESH token of the
+                    // user (session-domain rows are out of this purge's
+                    // reach: revoking gRPC sessions is never a side effect
+                    // of REST replay mitigation).
+                    sqlx::query!(
+                        "DELETE FROM refresh_tokens WHERE user_id = ? AND token NOT LIKE 'grpc-session:%'",
+                        user_id
+                    )
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_to_common_error)?;
                     RotationOutcome::ReuseDetected
                 }
             }
@@ -201,9 +246,10 @@ impl RefreshTokenRepository {
         // Expired-only retention purge, inside the transaction, at its end
         // and after the classification (and after the replacement insert on
         // the rotated path): already-used tokens are retained until their
-        // natural expiry so replays keep being detected.
+        // natural expiry so replays keep being detected. Refresh-domain
+        // predicate: the purge never touches session rows.
         sqlx::query!(
-            "DELETE FROM refresh_tokens WHERE user_id = ? AND expire_at < ?",
+            "DELETE FROM refresh_tokens WHERE user_id = ? AND expire_at < ? AND token NOT LIKE 'grpc-session:%'",
             user_id,
             now
         )
@@ -225,14 +271,15 @@ impl RefreshTokenRepository {
     /// path (`RefreshTokenService::add`) before the insert and inside the
     /// rotation transaction after the old-token classification. The
     /// `user_id` predicate rides the existing `idx_refresh_tokens_user_id`
-    /// index.
+    /// index. Refresh-domain predicate: session rows of the user are never
+    /// deleted by this issuance-path sweep.
     pub(crate) async fn delete_expired_for_user(
         &self,
         user_id: u32,
         now: DateTime<Utc>,
     ) -> Result<()> {
         sqlx::query!(
-            "DELETE FROM refresh_tokens WHERE user_id = ? AND expire_at < ?",
+            "DELETE FROM refresh_tokens WHERE user_id = ? AND expire_at < ? AND token NOT LIKE 'grpc-session:%'",
             user_id,
             now
         )
@@ -247,12 +294,135 @@ impl RefreshTokenRepository {
     /// Global sweep behind the public `RefreshTokenService::cleanup_expired`
     /// hook: token issuance only purges the logging-in user's rows, so
     /// tokens of users who never log in again are reached exclusively by
-    /// this explicit, caller-dependent sweep.
+    /// this explicit, caller-dependent sweep. Refresh-domain predicate:
+    /// expired session rows are left to `delete_expired_sessions`.
     pub(crate) async fn delete_expired(&self, now: DateTime<Utc>) -> Result<()> {
-        sqlx::query!("DELETE FROM refresh_tokens WHERE expire_at < ?", now)
-            .execute(&*self.pool)
-            .await
-            .map_err(map_sqlx_to_common_error)?;
+        sqlx::query!(
+            "DELETE FROM refresh_tokens WHERE expire_at < ? AND token NOT LIKE 'grpc-session:%'",
+            now
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
+
+    /// Insert a gRPC session row for `(user_id, raw_token)`.
+    ///
+    /// The session is stored under its domain-tagged digest
+    /// (`grpc-session:<sha256(raw)>`), so the plaintext never reaches SQL
+    /// and the row is unmatchable by every refresh-domain path. The
+    /// `is_used` flag is born FALSE; revocation flips it in one atomic
+    /// UPDATE (`revoke_session`). A duplicate raw token (same tagged digest
+    /// already stored) violates the column UNIQUE and surfaces as
+    /// `CommonError::UniqueViolation`, which the service maps to the typed
+    /// `RefreshTokenError::AlreadyExists` — no overwrite, no expiry
+    /// extension.
+    pub(crate) async fn insert_session(
+        &self,
+        user_id: u32,
+        token: &str,
+        expire_at: DateTime<Utc>,
+        created_at: DateTime<Utc>,
+    ) -> Result<()> {
+        // Digest bound to a local: the query borrows its arguments.
+        let digest = session_digest(token);
+        sqlx::query!(
+            "INSERT INTO refresh_tokens (user_id, token, expire_at, created_at, is_used) VALUES (?, ?, ?, ?, FALSE)",
+            user_id,
+            digest,
+            expire_at,
+            created_at
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
+
+    /// Non-consuming validation of a presented session token.
+    ///
+    /// Returns the owning user ID when ONE session-domain row matches the
+    /// tagged digest of the presented value AND is unrevoked
+    /// (`is_used = false`) AND strictly unexpired (`expire_at > now`): the
+    /// whole decision lives in the SQL predicate. The row is never mutated,
+    /// so validation repeats until revocation or expiry. The `token = ?`
+    /// equality rides the UNIQUE column constraint's implicit index (the
+    /// tagged digest can never equal a bare refresh digest by construction)
+    /// and the `LIKE 'grpc-session:%'` predicate is the explicit
+    /// session-domain guard every session path carries.
+    pub(crate) async fn session_user_id(
+        &self,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<u32>> {
+        // Digest bound to a local: the query borrows its arguments.
+        let digest = session_digest(token);
+        let record = sqlx::query!(
+            "SELECT user_id FROM refresh_tokens WHERE token = ? AND is_used = false AND expire_at > ? AND token LIKE 'grpc-session:%'",
+            digest,
+            now
+        )
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
+        Ok(record.map(|record| record.user_id as u32))
+    }
+
+    /// Revoke the session matching the presented raw token.
+    ///
+    /// ONE atomic statement: `is_used` flips to true for the session-domain
+    /// row carrying the tagged digest. Idempotent by design — an unknown,
+    /// already-revoked or expired presented value matches zero rows and
+    /// still reports success, so logout never errors on a stale token. The
+    /// session-domain predicate makes every refresh row unmatchable.
+    pub(crate) async fn revoke_session(&self, token: &str) -> Result<()> {
+        // Digest bound to a local: the query borrows its arguments.
+        let digest = session_digest(token);
+        sqlx::query!(
+            "UPDATE refresh_tokens SET is_used = true WHERE token = ? AND token LIKE 'grpc-session:%'",
+            digest
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
+
+    /// Revoke every session of one user in ONE atomic statement.
+    ///
+    /// Logout-everywhere: only session-domain rows of `user_id` flip to
+    /// `is_used = true`; refresh rows (consumed or live) are untouched, so
+    /// REST refresh rotation keeps working across a gRPC logout-all. The
+    /// `user_id` predicate rides the `idx_refresh_tokens_user_id` index
+    /// and the domain predicate filters the matched rows.
+    pub(crate) async fn revoke_all_sessions(&self, user_id: u32) -> Result<()> {
+        sqlx::query!(
+            "UPDATE refresh_tokens SET is_used = true WHERE user_id = ? AND token LIKE 'grpc-session:%'",
+            user_id
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
+        Ok(())
+    }
+
+    /// Delete the EXPIRED session rows of every user.
+    ///
+    /// Session counterpart of `delete_expired`: after expiry a session row
+    /// can never validate again (revoked or not), so expired session rows
+    /// are removed outright while every unexpired row — session AND refresh
+    /// — survives. Caller-dependent sweep behind the public
+    /// `RefreshTokenService::cleanup_expired_sessions` hook; the
+    /// session-domain predicate keeps refresh rows out of its reach.
+    pub(crate) async fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<()> {
+        sqlx::query!(
+            "DELETE FROM refresh_tokens WHERE expire_at < ? AND token LIKE 'grpc-session:%'",
+            now
+        )
+        .execute(&*self.pool)
+        .await
+        .map_err(map_sqlx_to_common_error)?;
         Ok(())
     }
 }

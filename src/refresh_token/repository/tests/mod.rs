@@ -590,3 +590,354 @@ fn new_replacement(user_id: u32, expire_at: DateTime<Utc>) -> RefreshToken {
         is_used: false,
     }
 }
+
+// Session-domain tests. Sessions share the refresh_tokens table but are
+// stored under `grpc-session:`-tagged digests; these tests pin the at-rest
+// format, the validation/revocation semantics, and the strict domain
+// scoping of every refresh sweep and session sweep.
+
+// Raw-row helper for session rows: binds the domain-tagged digest the
+// repository boundary stores (same hashing the production code applies).
+async fn session_row_count(pool: &sqlx::SqlitePool, user_id: u32, token: &str) -> Result<i64> {
+    let row =
+        sqlx::query("SELECT COUNT(*) AS n FROM refresh_tokens WHERE user_id = ? AND token = ?")
+            .bind(user_id)
+            .bind(session_digest(token))
+            .fetch_one(pool)
+            .await?;
+    Ok(row.try_get::<i64, _>("n")?)
+}
+
+// Simulates the clock moving past a session's expiry by rewriting its
+// `expire_at` into the past (no real-time waiting in tests).
+async fn expire_session(pool: &sqlx::SqlitePool, user_id: u32, token: &str) -> Result<()> {
+    sqlx::query("UPDATE refresh_tokens SET expire_at = ? WHERE user_id = ? AND token = ?")
+        .bind(Utc::now() - Duration::hours(1))
+        .bind(user_id)
+        .bind(session_digest(token))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// Seeds one session for `user_id`, expiring one hour in the future.
+async fn seed_session(
+    repository: &RefreshTokenRepository,
+    user_id: u32,
+    token: &str,
+) -> Result<()> {
+    repository
+        .insert_session(user_id, token, Utc::now() + Duration::hours(1), Utc::now())
+        .await?;
+    Ok(())
+}
+
+// At-rest format: the session row carries the exact tagged digest, the
+// plaintext appears nowhere, and the value is NOT the bare refresh-format
+// digest (the domain marker is what keeps the two token classes apart).
+#[tokio::test]
+async fn test_insert_session_stores_tagged_digest() -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    // Independent digest computation for the at-rest assertion (sha2
+    // directly, not the repository helper, so the format pin is not
+    // circular).
+    fn digest_hex(value: &str) -> String {
+        Sha256::digest(value.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session-token").await?;
+    let rows = sqlx::query("SELECT token FROM refresh_tokens WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_all(&*pool)
+        .await?;
+    assert_eq!(rows.len(), 1);
+    let stored: String = rows[0].try_get("token")?;
+    assert_eq!(
+        stored,
+        format!("grpc-session:{}", digest_hex("session-token"))
+    );
+    assert_ne!(stored, digest_hex("session-token"));
+    // The plaintext token matches no stored row anywhere in the table.
+    let plaintext = sqlx::query("SELECT COUNT(*) AS n FROM refresh_tokens WHERE token = ?")
+        .bind("session-token")
+        .fetch_one(&*pool)
+        .await?;
+    assert_eq!(plaintext.try_get::<i64, _>("n")?, 0);
+    Ok(())
+}
+
+// Non-consuming validation: a valid presentation returns the owning user
+// repeatedly; unknown values and digest strings (tagged or bare) match
+// nothing — a database thief presenting a stolen digest as a token finds
+// no session.
+#[tokio::test]
+async fn test_session_user_id_lookup_valid_unknown_and_digest_rejected() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session-token").await?;
+    let first = repository
+        .session_user_id("session-token", Utc::now())
+        .await?;
+    let second = repository
+        .session_user_id("session-token", Utc::now())
+        .await?;
+    assert_eq!(first, Some(user_id));
+    assert_eq!(second, Some(user_id));
+    // Unknown values match nothing.
+    assert_eq!(repository.session_user_id("other", Utc::now()).await?, None);
+    // Presenting the stored tagged digest — or its bare hex form — as a
+    // raw token double-hashes it and matches nothing.
+    let tagged = session_digest("session-token");
+    assert_eq!(repository.session_user_id(&tagged, Utc::now()).await?, None);
+    assert_eq!(
+        repository
+            .session_user_id(&token_digest("session-token"), Utc::now())
+            .await?,
+        None
+    );
+    Ok(())
+}
+
+// Strictly-unexpired predicate: after the clock passes the expiry the
+// session stops validating while the row itself stays untouched.
+#[tokio::test]
+async fn test_expired_session_not_validated() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session-token").await?;
+    assert_eq!(
+        repository
+            .session_user_id("session-token", Utc::now())
+            .await?,
+        Some(user_id)
+    );
+    expire_session(&pool, user_id, "session-token").await?;
+    assert_eq!(
+        repository
+            .session_user_id("session-token", Utc::now())
+            .await?,
+        None
+    );
+    // The row is still there (expiry alone is not deletion).
+    assert_eq!(session_row_count(&pool, user_id, "session-token").await?, 1);
+    Ok(())
+}
+
+// Single revocation: the revoked session stops validating, its sibling
+// keeps working, and revoking again (or an unknown value) stays a no-op
+// success.
+#[tokio::test]
+async fn test_revoked_session_not_validated_and_idempotent() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session-token").await?;
+    seed_session(&repository, user_id, "other-session").await?;
+    repository.revoke_session("session-token").await?;
+    assert_eq!(
+        repository
+            .session_user_id("session-token", Utc::now())
+            .await?,
+        None
+    );
+    assert_eq!(
+        repository
+            .session_user_id("other-session", Utc::now())
+            .await?,
+        Some(user_id)
+    );
+    repository.revoke_session("session-token").await?;
+    repository.revoke_session("never-stored").await?;
+    Ok(())
+}
+
+// User-wide revocation: every session of the user flips to revoked while
+// the user's refresh rows keep their exact pre-revocation state; another
+// user's sessions are out of reach.
+#[tokio::test]
+async fn test_revoke_all_sessions_scope_keeps_refresh_rows() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session-a").await?;
+    seed_session(&repository, user_id, "session-b").await?;
+    repository
+        .insert(&RefreshToken {
+            id: 0,
+            user_id,
+            token: "refresh".to_string(),
+            expire_at: now_plus_1h(),
+            created_at: Utc::now(),
+            is_used: false,
+        })
+        .await?;
+    // Revoking every session of a nonexistent user changes nothing.
+    repository.revoke_all_sessions(2606).await?;
+    assert_eq!(
+        repository.session_user_id("session-a", Utc::now()).await?,
+        Some(user_id)
+    );
+    // Logout-everywhere: both sessions revoked, refresh row untouched.
+    repository.revoke_all_sessions(user_id).await?;
+    assert_eq!(
+        repository.session_user_id("session-a", Utc::now()).await?,
+        None
+    );
+    assert_eq!(
+        repository.session_user_id("session-b", Utc::now()).await?,
+        None
+    );
+    assert_eq!(token_row_count(&pool, user_id, "refresh").await?, 1);
+    assert_eq!(token_is_used(&pool, user_id, "refresh").await?, Some(false));
+    Ok(())
+}
+
+// Session expiry cleanup: expired session rows are removed while every
+// unexpired row — session AND refresh — survives.
+#[tokio::test]
+async fn test_delete_expired_sessions_leaves_refresh_rows_intact() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "live-session").await?;
+    seed_session(&repository, user_id, "dead-session").await?;
+    expire_session(&pool, user_id, "dead-session").await?;
+    repository
+        .insert(&RefreshToken {
+            id: 0,
+            user_id,
+            token: "live-refresh".to_string(),
+            expire_at: now_plus_1h(),
+            created_at: Utc::now(),
+            is_used: false,
+        })
+        .await?;
+    repository.delete_expired_sessions(Utc::now()).await?;
+    assert_eq!(session_row_count(&pool, user_id, "dead-session").await?, 0);
+    assert_eq!(session_row_count(&pool, user_id, "live-session").await?, 1);
+    assert_eq!(
+        repository
+            .session_user_id("live-session", Utc::now())
+            .await?,
+        Some(user_id)
+    );
+    assert_eq!(token_row_count(&pool, user_id, "live-refresh").await?, 1);
+    Ok(())
+}
+
+// The three refresh sweeps (add-path purge, user-wide deletion, global
+// expiry cleanup) never delete a session row.
+#[tokio::test]
+async fn test_refresh_sweeps_leave_session_rows_intact() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session").await?;
+    // One expired and one live refresh row for the same user.
+    repository
+        .insert(&RefreshToken {
+            id: 0,
+            user_id,
+            token: "expired-refresh".to_string(),
+            expire_at: Utc::now() - Duration::hours(1),
+            created_at: Utc::now(),
+            is_used: false,
+        })
+        .await?;
+    repository
+        .insert(&RefreshToken {
+            id: 0,
+            user_id,
+            token: "live-refresh".to_string(),
+            expire_at: now_plus_1h(),
+            created_at: Utc::now(),
+            is_used: false,
+        })
+        .await?;
+    // Add-path expiry purge (delete_expired_for_user).
+    repository
+        .delete_expired_for_user(user_id, Utc::now())
+        .await?;
+    assert_eq!(session_row_count(&pool, user_id, "session").await?, 1);
+    assert_eq!(token_row_count(&pool, user_id, "expired-refresh").await?, 0);
+    // Global expiry cleanup (delete_expired behind cleanup_expired).
+    repository.delete_expired(Utc::now()).await?;
+    assert_eq!(session_row_count(&pool, user_id, "session").await?, 1);
+    // User-wide refresh deletion (delete_by_user_id).
+    repository.delete_by_user_id(user_id).await?;
+    assert_eq!(token_row_count(&pool, user_id, "live-refresh").await?, 0);
+    // The session row survived every refresh sweep.
+    assert_eq!(session_row_count(&pool, user_id, "session").await?, 1);
+    assert_eq!(
+        repository.session_user_id("session", Utc::now()).await?,
+        Some(user_id)
+    );
+    Ok(())
+}
+
+// Rotation-transaction purges: the expired-only retention purge and the
+// replay-driven reuse purge both delete refresh rows only; the session row
+// of the same user stays valid through a full rotation + replay cycle.
+#[tokio::test]
+async fn test_rotation_purges_leave_session_rows_intact() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = RefreshTokenRepository::new(pool.clone());
+    let user_id = test_user(&connection).await?;
+    seed_session(&repository, user_id, "session").await?;
+    repository
+        .insert(&RefreshToken {
+            id: 0,
+            user_id,
+            token: "refresh".to_string(),
+            expire_at: now_plus_1h(),
+            created_at: Utc::now(),
+            is_used: false,
+        })
+        .await?;
+    // Legitimate rotation (in-transaction retention purge ran).
+    let rotated = repository
+        .rotate(
+            user_id,
+            "refresh",
+            &new_replacement(user_id, now_plus_1h()),
+            Utc::now(),
+        )
+        .await?;
+    assert!(matches!(rotated, RotationOutcome::Rotated(_)));
+    assert_eq!(session_row_count(&pool, user_id, "session").await?, 1);
+    // Replay (reuse purge deletes every refresh row of the user).
+    let replay = repository
+        .rotate(
+            user_id,
+            "refresh",
+            &new_replacement(user_id, now_plus_1h()),
+            Utc::now(),
+        )
+        .await?;
+    assert_eq!(replay, RotationOutcome::ReuseDetected);
+    assert_eq!(token_row_count(&pool, user_id, "replacement").await?, 0);
+    // The session row is still present and still validates.
+    assert_eq!(session_row_count(&pool, user_id, "session").await?, 1);
+    assert_eq!(
+        repository.session_user_id("session", Utc::now()).await?,
+        Some(user_id)
+    );
+    Ok(())
+}

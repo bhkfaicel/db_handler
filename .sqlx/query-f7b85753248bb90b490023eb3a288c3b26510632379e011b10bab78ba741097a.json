@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT is_used, expire_at FROM refresh_tokens WHERE user_id = ? AND token = ?",
+  "query": "SELECT is_used, expire_at FROM refresh_tokens WHERE user_id = ? AND token = ? AND token NOT LIKE 'grpc-session:%'",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "937df5c5114edf8b745116b1b1548585368beedceedcaed18c9a4177626d2d48"
+  "hash": "f7b85753248bb90b490023eb3a288c3b26510632379e011b10bab78ba741097a"
 }

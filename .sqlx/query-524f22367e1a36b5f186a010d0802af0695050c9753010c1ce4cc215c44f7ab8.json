@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE refresh_tokens SET is_used = true WHERE user_id = ? AND token = ? AND is_used = false AND expire_at > ? AND token NOT LIKE 'grpc-session:%'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "524f22367e1a36b5f186a010d0802af0695050c9753010c1ce4cc215c44f7ab8"
+}
