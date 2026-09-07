@@ -7,6 +7,12 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-07
+
+### Updated
+
+- Crago.lock
+
 ## [0.3.1] - 2026-09-07
 
 ### Updated
