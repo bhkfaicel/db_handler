@@ -10,7 +10,7 @@ Rust library for the Home IoT backend: primary database (SQLite), time-series hi
 
 - **Primary DB**: SQLite with [sqlx](https://github.com/launchbadge/sqlx), migrations, connection pooling
 - **History DB**: InfluxDB 2.x client (rustls), sensor history (e.g. contact sensors)
-- **Domain**: Sensors (typed models, contact sensors), users (bcrypt), keys, refresh tokens, nonces
+- **Domain**: Sensors (typed models, contact sensors), users (Argon2id), keys, refresh tokens, nonces
 - **Optional**: OpenAPI docs via `utoipaDoc` feature
 
 ## Prerequisites

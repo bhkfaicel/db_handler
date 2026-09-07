@@ -37,13 +37,23 @@ and this project adheres to semantic versioning.
   data, errors, logs, Debug output or serialization. Existing REST
   refresh rotation behavior is unchanged.
 
+### Removed
+
+- The `bcrypt` dependency is fully removed from the crate manifest and its
+  dependency graph, along with the transitive `blowfish` and `base64` entries
+  nothing else retained.
+
 ### Changed
 
 - **Breaking:** user passwords are now hashed with Argon2id (RustCrypto,
   default parameters `v=19, m=19456, t=2, p=1`) and stored as standard PHC
-  strings with a unique OS-CSPRNG salt per hash, replacing bcrypt. Existing
-  bcrypt hashes are not verified and every existing account needs a password
-  reset before it can log in again.
+  strings with a unique OS-CSPRNG salt per hash, replacing bcrypt.
+- **Operational warning (zero legacy):** existing bcrypt password hashes are
+  intentionally unsupported in 0.4.0 and there is NO verification fallback:
+  a legacy stored hash fails closed (no user returned, no panic). EVERY
+  existing account MUST have its password reset through an approved
+  provisioning/reset path BEFORE any consumer rolls out 0.4.0; logging in
+  with a pre-migration password can never succeed.
 - Password policy for the whole users domain: clear passwords must be
   8–128 bytes. Creation and password resets outside that range are rejected
   with the typed `UserError::InvalidInput` error; login attempts with
@@ -53,7 +63,10 @@ and this project adheres to semantic versioning.
   emails verify against a fixed, valid Argon2id dummy PHC with the same
   policy, so wrong password and unknown email stay indistinguishable.
   Malformed stored PHC strings fail closed (no user, no panic) without
-  exposing hash material. Email lookups remain byte-exact: no trimming,
+  exposing hash material, and that failure path now also burns one dummy
+  Argon2id verification, making it timing-indistinguishable from the
+  wrong-password and unknown-email responses during the password-reset
+  transition window. Email lookups remain byte-exact: no trimming,
   lowercasing, or case folding.
 
 ## [0.3.2] - 2026-09-07

@@ -7,11 +7,14 @@ use crate::{
 // The repository persists the hash it is handed, so the update fixtures
 // need a real Argon2id PHC string; build it with the domain hashing helper
 // directly (synchronous primitive) instead of going through the service.
-use crate::users::password::hash_password;
+// The dummy constants/verifier back the malformed-hash timing-equalization
+// proof below.
+use crate::users::password::{hash_password, verify_password_async, DUMMY_ARGON2_HASH};
 // Explicit anyhow Result: the repository module now re-exports the
 // `CommonError`-based `Result` alias, which must not shadow the tests'
 // return type.
 use anyhow::{Ok, Result};
+use std::time::Instant;
 
 #[tokio::test]
 async fn test_insert_user() -> Result<()> {
@@ -237,7 +240,12 @@ async fn test_get_by_email_and_password_absent_email_verifies_dummy_hash() -> Re
 
 // Fail-closed discipline: a corrupted (malformed PHC) stored hash must
 // report no user without panicking — never an `Ok(Some(user))`, never an
-// error bubbling up from the lookup itself.
+// error bubbling up from the lookup itself. The parse failure must ALSO
+// cost the same one Argon2 derivation as the unknown-email and
+// wrong-password paths: a bare PHC parse error returns in microseconds,
+// so without the equalizing dummy burn the fast response would reveal,
+// by timing alone, that the email exists with an unusable (pre-migration)
+// hash (timing user-enumeration oracle, CWE-208).
 #[tokio::test]
 async fn test_get_by_email_and_password_malformed_stored_hash_fails_closed() -> Result<()> {
     let connection = Connection::new().await?;
@@ -250,16 +258,45 @@ async fn test_get_by_email_and_password_malformed_stored_hash_fails_closed() -> 
         Some("not-a-valid-phc".to_string()),
     );
     let id = repository.insert(&user).await?;
+    let malformed_start = Instant::now();
     let result = repository
         .get_by_email_and_password(
             "malformed@bhk.com".to_string(),
             "whatever-password".to_string(),
         )
         .await?;
+    let malformed_elapsed = malformed_start.elapsed();
     assert!(result.is_none(), "malformed stored hash must fail closed");
     // Even the correct-looking password cannot authenticate a corrupted row.
     let user = repository.get_by_id(id as u32).await?;
     assert!(user.is_some());
+    // Deterministic dummy-work proof: measure one warm dummy verification
+    // (the exact cost an unknown-email login pays) and require the
+    // malformed-hash login to have taken at least a quarter of it. A real
+    // default-policy Argon2id derivation is orders of magnitude (~10³×)
+    // more expensive than rejecting a string at the PHC parser, so only a
+    // burned dummy verification can satisfy the bound; a regression that
+    // skips the burn returns ~1000× faster and fails this assertion on any
+    // hardware. The reference runs AFTER the login, so the login's burn
+    // (potentially cold, hence slower) can only look more expensive, never
+    // less.
+    verify_password_async("warm-up".to_string(), DUMMY_ARGON2_HASH.to_string())
+        .await
+        .unwrap();
+    let reference_start = Instant::now();
+    verify_password_async(
+        "reference-password".to_string(),
+        DUMMY_ARGON2_HASH.to_string(),
+    )
+    .await
+    .unwrap();
+    let reference_elapsed = reference_start.elapsed();
+    assert!(
+        malformed_elapsed >= reference_elapsed / 4,
+        "malformed-hash login returned too fast ({malformed_elapsed:?}) compared to \
+         one dummy verification ({reference_elapsed:?}): the equalizing dummy burn \
+         on the verification-error path is missing"
+    );
     Ok(())
 }
 
@@ -454,7 +491,7 @@ async fn test_update_by_id_only_password() -> Result<()> {
             id,
             None,
             None,
-            // Same contract as above: hand the repository a bcrypt hash.
+            // Same contract as above: hand the repository an Argon2id PHC.
             Some(hash_password("123456789").unwrap()),
         )
         .await

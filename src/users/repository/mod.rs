@@ -140,13 +140,32 @@ impl UserRepository {
         // dummy PHC (same default policy, see `DUMMY_ARGON2_HASH`), so both
         // branches burn identical CPU and response time can no longer
         // reveal whether an email is registered (timing user-enumeration
-        // oracle, CWE-208).
+        // oracle, CWE-208). The presented password is cloned first
+        // (bounded to 8-128 bytes by the gate above) so a failed
+        // verification can still burn the equalizing dummy derivation
+        // below.
         let stored_hash = result.as_ref().map(|record| record.password_hash.clone());
         let verified = verify_password_async(
-            password,
+            password.clone(),
             stored_hash.unwrap_or_else(|| DUMMY_ARGON2_HASH.to_owned()),
         )
         .await;
+        // Equalize the verification-ERROR path too (CWE-208): a stored
+        // hash that fails PHC parsing — the shape of every pre-migration
+        // or corrupted row — errors out before any Argon2 work, so its
+        // response would be measurably faster than the wrong-password and
+        // unknown-email responses and reveal that the email exists with
+        // an unusable hash. Burn exactly one dummy verification (result
+        // discarded) before reporting the failure uniformly: malformed
+        // rows, unknown emails and wrong passwords all cost one
+        // derivation.
+        let verified = match verified {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let _ = verify_password_async(password, DUMMY_ARGON2_HASH.to_owned()).await;
+                Err(error)
+            }
+        };
 
         match (result, verified) {
             (Some(record), Ok(true)) => {

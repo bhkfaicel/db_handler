@@ -86,7 +86,7 @@ fn test_verify_password_malformed_phc_fails_closed() {
         "",
         "not-a-phc",
         "$argon2id$garbage",
-        "$bcrypt$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFy",
+        "$pbkdf2-sha256$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFy",
         "$argon2i$v=19$m=19456,t=2,p=1$LVqSDkuc8AaNn2RY/XKdHA$RexxtUuD7oN3tD2xhnxvYTM9oL/+RFTRzrqYv7GD5PE",
     ] {
         let result = verify_password("super_secret", garbage);
