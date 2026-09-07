@@ -7,6 +7,25 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** user passwords are now hashed with Argon2id (RustCrypto,
+  default parameters `v=19, m=19456, t=2, p=1`) and stored as standard PHC
+  strings with a unique OS-CSPRNG salt per hash, replacing bcrypt. Existing
+  bcrypt hashes are not verified and every existing account needs a password
+  reset before it can log in again.
+- Password policy for the whole users domain: clear passwords must be
+  8–128 bytes. Creation and password resets outside that range are rejected
+  with the typed `UserError::InvalidInput` error; login attempts with
+  out-of-range passwords uniformly return no user (before any hashing work),
+  independently of whether the email exists.
+- Login keeps the anti-enumeration dummy-verification design: unknown
+  emails verify against a fixed, valid Argon2id dummy PHC with the same
+  policy, so wrong password and unknown email stay indistinguishable.
+  Malformed stored PHC strings fail closed (no user, no panic) without
+  exposing hash material. Email lookups remain byte-exact: no trimming,
+  lowercasing, or case folding.
+
 ## [0.3.2] - 2026-09-07
 
 ### Updated

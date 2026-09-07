@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::users::model::{User, UserSortKey};
 
 use super::model::InternalUser;
-use super::password::{verify_password_async, DUMMY_BCRYPT_HASH};
+use super::password::{password_length_ok, verify_password_async, DUMMY_ARGON2_HASH};
 
 /// Repository for performing CRUD operations on `User` entities.
 ///
@@ -45,9 +45,9 @@ impl UserRepository {
         id: u32,
         username: Option<String>,
         email: Option<String>,
-        // Already bcrypt-hashed by the service: hashing is domain logic and
-        // lives above the data-access layer, which only persists what it is
-        // handed.
+        // Already Argon2id-hashed by the service: hashing is domain logic
+        // and lives above the data-access layer, which only persists what
+        // it is handed.
         password_hash: Option<String>,
     ) -> Result<u32> {
         let mut query_builder = QueryBuilder::<Sqlite>::new("UPDATE users SET ");
@@ -119,6 +119,14 @@ impl UserRepository {
         email: String,
         password: String,
     ) -> Result<Option<User>> {
+        // Uniform length gate: an out-of-range password is rejected as
+        // `None` BEFORE any SQL or Argon2 work, independently of whether
+        // the byte-exact email exists, so an invalid length can never
+        // reveal account existence.
+        if !password_length_ok(&password) {
+            return Ok(None);
+        }
+
         let result = sqlx::query!(
             "SELECT id, username, email,password_hash FROM users WHERE email = ?",
             email
@@ -127,16 +135,16 @@ impl UserRepository {
         .await
         .map_err(map_sqlx_to_common_error)?;
 
-        // Single always-verify path: bcrypt runs exactly once whether or
+        // Single always-verify path: Argon2 runs exactly once whether or
         // not the email exists. An unknown email verifies against a fixed
-        // dummy hash (same DEFAULT_COST policy, see `DUMMY_BCRYPT_HASH`),
-        // so both branches burn identical CPU and response time can no
-        // longer reveal whether an email is registered (timing
-        // user-enumeration oracle, CWE-208).
+        // dummy PHC (same default policy, see `DUMMY_ARGON2_HASH`), so both
+        // branches burn identical CPU and response time can no longer
+        // reveal whether an email is registered (timing user-enumeration
+        // oracle, CWE-208).
         let stored_hash = result.as_ref().map(|record| record.password_hash.clone());
         let verified = verify_password_async(
             password,
-            stored_hash.unwrap_or_else(|| DUMMY_BCRYPT_HASH.to_owned()),
+            stored_hash.unwrap_or_else(|| DUMMY_ARGON2_HASH.to_owned()),
         )
         .await;
 
@@ -152,7 +160,8 @@ impl UserRepository {
                 }))
             }
             // Any other combination — unknown email, wrong password, or a
-            // verification error — reports no user, as before.
+            // malformed/failed verification — reports no user: fail closed
+            // without panic and without exposing hash details.
             _ => Ok(None),
         }
     }

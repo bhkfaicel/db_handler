@@ -9,7 +9,9 @@ use crate::{
     users::{
         error::{Result, UserError},
         model::{PaginationParams, User},
-        password::hash_password_async,
+        password::{
+            hash_password_async, password_length_ok, MAX_PASSWORD_BYTES, MIN_PASSWORD_BYTES,
+        },
         repository::UserRepository,
     },
 };
@@ -39,15 +41,23 @@ fn map_common_error(e: CommonError, email: Option<&str>) -> UserError {
     }
 }
 
-/// Maps a password-hashing failure to the domain error: a real bcrypt
-/// failure keeps the dedicated `PasswordHashing` variant, anything else is
-/// reported as a generic operation error.
+/// Maps a password-hashing failure to the domain error.
 fn map_hash_error(e: anyhow::Error) -> UserError {
-    if let Some(be) = e.downcast_ref::<bcrypt::BcryptError>() {
-        UserError::PasswordHashing(be.to_string())
-    } else {
-        UserError::operation(e.to_string())
+    // Argon2/PHC failure details never include the hash or the password;
+    // surface only the failure message.
+    UserError::PasswordHashing(e.to_string())
+}
+
+/// Rejects a clear password outside the house policy bounds (8..=128
+/// bytes) with the typed input error, before any hashing work.
+fn validate_password(password: &str) -> Result<()> {
+    if !password_length_ok(password) {
+        return Err(UserError::invalid_input(format!(
+            "password length must be between {} and {} bytes",
+            MIN_PASSWORD_BYTES, MAX_PASSWORD_BYTES
+        )));
     }
+    Ok(())
 }
 
 pub struct UserService {
@@ -89,9 +99,12 @@ impl UserService {
     /// # }
     /// ```
     pub async fn add(&self, username: String, email: String, password: String) -> Result<u32> {
-        // The hash runs on the blocking pool via the async helper: a cost-12
-        // bcrypt call is ~100-300 ms of CPU and must never stall the tokio
-        // worker inline.
+        // Enforce the house password policy before hashing: reject
+        // out-of-range secrets with the typed input error, no Argon2 work.
+        validate_password(&password)?;
+        // The hash runs on the blocking pool via the async helper: an
+        // Argon2id derivation is ~tens of ms of CPU/memory and must never
+        // stall the tokio worker inline.
         let password_hash = hash_password_async(password)
             .await
             .map_err(map_hash_error)?;
@@ -301,16 +314,22 @@ impl UserService {
         email: Option<String>,
         password: Option<String>,
     ) -> Result<u32> {
-        // Hashing is domain logic: the clear password is hashed here, in
-        // the service, and the repository only persists the hash it is
-        // handed.
+        // Hashing is domain logic: the clear password is validated and
+        // hashed here, in the service, and the repository only persists the
+        // hash it is handed.
         let password_hash = match password {
-            // Async helper again: bcrypt on the blocking pool, never inline.
-            Some(password) => Some(
-                hash_password_async(password)
-                    .await
-                    .map_err(map_hash_error)?,
-            ),
+            Some(password) => {
+                // Same policy as creation: reject out-of-range reset
+                // passwords with the typed input error before hashing.
+                validate_password(&password)?;
+                // Async helper again: Argon2 on the blocking pool, never
+                // inline.
+                Some(
+                    hash_password_async(password)
+                        .await
+                        .map_err(map_hash_error)?,
+                )
+            }
             None => None,
         };
         self.repository

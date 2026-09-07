@@ -5,9 +5,9 @@ use crate::{
     users::{model::User, service::UserService},
 };
 // The repository persists the hash it is handed, so the update fixtures
-// need a real bcrypt hash; build it with bcrypt directly instead of
-// reaching into the users-domain hashing helper.
-use bcrypt::{hash, DEFAULT_COST};
+// need a real Argon2id PHC string; build it with the domain hashing helper
+// directly (synchronous primitive) instead of going through the service.
+use crate::users::password::hash_password;
 // Explicit anyhow Result: the repository module now re-exports the
 // `CommonError`-based `Result` alias, which must not shadow the tests'
 // return type.
@@ -217,12 +217,13 @@ async fn test_get_by_email_and_password_no_user_on_db() -> Result<()> {
 }
 
 // Deterministic absent-branch exercise for the always-verify login path:
-// with no matching user, the lookup must still complete the full bcrypt
-// verification against the fixed dummy hash (the password-helpers test
-// proves that constant is a real cost-12 hash that rejects passwords, so
-// reaching None below required real bcrypt work) and only then report no
-// user. This keeps the unknown-email response's CPU cost identical to the
-// wrong-password response, closing the timing-based email enumeration.
+// with no matching user, the lookup must still complete the full Argon2id
+// verification against the fixed dummy PHC (the password-helpers test
+// proves that constant is a real default-policy hash that rejects
+// passwords, so reaching None below required real Argon2 work) and only
+// then report no user. This keeps the unknown-email response's CPU cost
+// identical to the wrong-password response, closing the timing-based email
+// enumeration.
 #[tokio::test]
 async fn test_get_by_email_and_password_absent_email_verifies_dummy_hash() -> Result<()> {
     let connection = Connection::new().await?;
@@ -231,6 +232,147 @@ async fn test_get_by_email_and_password_absent_email_verifies_dummy_hash() -> Re
         .get_by_email_and_password("nobody@bhk.com".to_string(), "password".to_string())
         .await?;
     assert!(result.is_none());
+    Ok(())
+}
+
+// Fail-closed discipline: a corrupted (malformed PHC) stored hash must
+// report no user without panicking — never an `Ok(Some(user))`, never an
+// error bubbling up from the lookup itself.
+#[tokio::test]
+async fn test_get_by_email_and_password_malformed_stored_hash_fails_closed() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool.clone());
+    let user = InternalUser::new(
+        0,
+        "username".to_string(),
+        "malformed@bhk.com".to_string(),
+        Some("not-a-valid-phc".to_string()),
+    );
+    let id = repository.insert(&user).await?;
+    let result = repository
+        .get_by_email_and_password(
+            "malformed@bhk.com".to_string(),
+            "whatever-password".to_string(),
+        )
+        .await?;
+    assert!(result.is_none(), "malformed stored hash must fail closed");
+    // Even the correct-looking password cannot authenticate a corrupted row.
+    let user = repository.get_by_id(id as u32).await?;
+    assert!(user.is_some());
+    Ok(())
+}
+
+// Uniform length gate for login: an out-of-range password (7 or 129 bytes)
+// must return `None` with the SAME outcome whether the email exists or not,
+// and without any Argon2 work (enforced by the early return before the SQL
+// lookup in the repository).
+#[tokio::test]
+async fn test_get_by_email_and_password_out_of_range_password_uniform_none() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool.clone());
+    let service = UserService::new(connection.clone());
+    service
+        .add(
+            "username".to_string(),
+            "range@bhk.com".to_string(),
+            "longenough".to_string(),
+        )
+        .await?;
+    // Present email, too-short password.
+    let present_short = repository
+        .get_by_email_and_password("range@bhk.com".to_string(), "a".repeat(7))
+        .await?;
+    // Absent email, too-short password: identical outcome.
+    let absent_short = repository
+        .get_by_email_and_password("ghost@bhk.com".to_string(), "a".repeat(7))
+        .await?;
+    // Present email, too-long password (129 bytes).
+    let present_long = repository
+        .get_by_email_and_password("range@bhk.com".to_string(), "a".repeat(129))
+        .await?;
+    // Absent email, too-long password: identical outcome.
+    let absent_long = repository
+        .get_by_email_and_password("ghost@bhk.com".to_string(), "a".repeat(129))
+        .await?;
+    assert!(present_short.is_none());
+    assert!(absent_short.is_none());
+    assert!(present_long.is_none());
+    assert!(absent_long.is_none());
+    Ok(())
+}
+
+// Boundary login acceptance: exactly 8 and exactly 128-byte passwords are
+// inside the policy and must authenticate when correct.
+#[tokio::test]
+async fn test_get_by_email_and_password_accepts_boundary_passwords() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool.clone());
+    let service = UserService::new(connection.clone());
+    let id_min = service
+        .add("min".to_string(), "min@bhk.com".to_string(), "a".repeat(8))
+        .await?;
+    let id_max = service
+        .add(
+            "max".to_string(),
+            "max@bhk.com".to_string(),
+            "a".repeat(128),
+        )
+        .await?;
+    let login_min = repository
+        .get_by_email_and_password("min@bhk.com".to_string(), "a".repeat(8))
+        .await?;
+    let login_max = repository
+        .get_by_email_and_password("max@bhk.com".to_string(), "a".repeat(128))
+        .await?;
+    assert_eq!(login_min.unwrap().id, id_min);
+    assert_eq!(login_max.unwrap().id, id_max);
+    Ok(())
+}
+
+// Email lookups stay BYTE-EXACT: case differences and surrounding
+// whitespace are different emails. The lookup must not normalize, trim, or
+// case-fold the stored or presented email.
+#[tokio::test]
+async fn test_get_by_email_and_password_email_is_byte_exact() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool.clone());
+    let service = UserService::new(connection.clone());
+    service
+        .add(
+            "username".to_string(),
+            "User@Example.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    // Lowercased variant: different email, no user.
+    assert!(repository
+        .get_by_email_and_password("user@example.com".to_string(), "password".to_string())
+        .await?
+        .is_none());
+    // Uppercased variant: different email, no user.
+    assert!(repository
+        .get_by_email_and_password("USER@EXAMPLE.COM".to_string(), "password".to_string())
+        .await?
+        .is_none());
+    // Trailing whitespace: different email, no user.
+    assert!(repository
+        .get_by_email_and_password("User@Example.com ".to_string(), "password".to_string())
+        .await?
+        .is_none());
+    // Leading whitespace: different email, no user.
+    assert!(repository
+        .get_by_email_and_password(" User@Example.com".to_string(), "password".to_string())
+        .await?
+        .is_none());
+    // The byte-exact form still authenticates.
+    assert!(repository
+        .get_by_email_and_password("User@Example.com".to_string(), "password".to_string())
+        .await?
+        .is_some());
     Ok(())
 }
 
@@ -277,7 +419,7 @@ async fn test_update_by_id() -> Result<()> {
             Some("email".to_string()),
             // The repository persists the hash it is handed: hashing now
             // happens in the domain, so the update input is hashed first.
-            Some(hash("123456789", DEFAULT_COST).unwrap()),
+            Some(hash_password("123456789").unwrap()),
         )
         .await
         .unwrap();
@@ -313,7 +455,7 @@ async fn test_update_by_id_only_password() -> Result<()> {
             None,
             None,
             // Same contract as above: hand the repository a bcrypt hash.
-            Some(hash("123456789", DEFAULT_COST).unwrap()),
+            Some(hash_password("123456789").unwrap()),
         )
         .await
         .unwrap();
@@ -380,7 +522,7 @@ async fn test_update_by_id_no_user_updated() -> Result<()> {
             Some("email".to_string()),
             // The repository persists the hash it is handed: hashing now
             // happens in the domain, so the update input is hashed first.
-            Some(hash("123456789", DEFAULT_COST).unwrap()),
+            Some(hash_password("123456789").unwrap()),
         )
         .await
         .unwrap();
