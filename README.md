@@ -134,15 +134,59 @@ Or use `./scripts/test-docker.sh` for the full suite including InfluxDB.
 ## Features (cargo)
 
 - `sensors` – Sensor and contact sensor support
-- `users` – User and auth-related services
+- `users` – User domain (Argon2id login) and `refresh_token` domain (REST refresh rotation + gRPC session API); see [Authentication and session tokens](#authentication-and-session-tokens)
 - `utoipaDoc` – OpenAPI documentation (adds `utoipa` dependency)
-- `models` – Optional model/API extras
 
 Build with the features you need, for example:
 
 ```bash
 cargo build --features "sensors,users,utoipaDoc"
 ```
+
+## Authentication and session tokens
+
+Everything in this section requires the `users` feature, which gates the
+`users` domain together with the `refresh_token` domain as one closure.
+
+**Passwords (breaking in 0.4.0).** New and reset passwords are hashed with
+Argon2id (standard PHC strings, unique OS-CSPRNG salt per hash, default
+RustCrypto parameters) and must be 8–128 bytes; anything else is rejected
+with a typed error on creation/reset, and login attempts with out-of-range
+passwords fail uniformly before any hashing work. **There is no legacy
+fallback**: bcrypt hashes are intentionally unsupported in 0.4.0, every
+pre-existing account fails closed until its password is reset through an
+approved provisioning/reset path. Email stays the sole login identifier and
+lookups are byte-exact: emails are never trimmed, lowercased or case-folded.
+Login runs exactly one Argon2id verification (unknown emails burn the same
+work against a fixed dummy hash, so response timing cannot reveal whether an
+account exists).
+
+**gRPC sessions (additive).** `RefreshTokenService` gains `add_session`,
+`validate_session`, `revoke_session`, `revoke_all_sessions` and
+`cleanup_expired_sessions`. The library never generates tokens: the caller
+supplies an opaque value that MUST carry at least 256 bits of OS-CSPRNG
+unpredictability (empty, oversized or inverted-window values are rejected
+before any SQL). Validation is **non-consuming** — it may repeat per request
+and fails closed (`None` for unknown, expired and revoked alike, with no way
+to distinguish them). `revoke_session` and `revoke_all_sessions` are single
+atomic idempotent statements (logout and logout-everywhere); expired session
+rows leave only through the explicit `cleanup_expired_sessions` sweep.
+
+**Token-domain separation.** Sessions are stored under the tagged digest
+`grpc-session:<sha256(raw)>` while REST refresh tokens keep their bare
+64-hex digests. Every refresh SQL path matches only refresh-domain rows and
+every session path only session-domain rows, so no refresh rotation, reuse
+purge or deletion can consume or revoke a gRPC session (nor the reverse),
+and the same raw value can exist in both domains as two distinct rows.
+**No SQL migration was needed**: the tagged value fits the existing
+`TEXT NOT NULL UNIQUE` column and existing refresh digests stay valid.
+
+**Coordinated rollout.** Publish 0.4.0 first. Then `backend/`
+(`rest_api_server`) bumps to it, adapts its email login and re-verifies REST
+refresh rotation in its own mini-cycle. Then `backend_grpc` enables `users`
+and resumes its gated authentication work. **Neither consumer is compatible
+with 0.4.0 until its own mini-cycle completes**, and deployment waits for
+both.
 
 ## License
 

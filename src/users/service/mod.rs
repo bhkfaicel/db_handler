@@ -150,18 +150,32 @@ impl UserService {
         self.repository.get_by_id(id).await.map_err(UserError::from)
     }
 
-    /// Retrieves a user by its Email and clear password.
+    /// Retrieves a user by email and clear password (email login).
+    ///
+    /// The email lookup is byte-exact: the stored `email` is matched as-is
+    /// (no trimming, lowercasing or case folding) and remains the sole
+    /// login identifier. The presented password must be 8–128 bytes:
+    /// out-of-range values return `None` before any hashing work,
+    /// independently of whether the email exists. Verification runs one
+    /// Argon2id derivation (an unknown email burns the same work against a
+    /// fixed dummy PHC of the same policy, so response timing cannot reveal
+    /// account existence) and every failing combination returns `None`.
+    /// Stored hashes are standard PHC strings; legacy bcrypt rows are
+    /// intentionally unsupported in 0.4.0 (fail closed, no fallback), so
+    /// every pre-existing account must reset its password before it can
+    /// log in.
     ///
     /// # Arguments
     ///
-    /// * `email` - The email of the user to retrieve.
-    /// * `password` - The non hashed password of the user to retrieve.
+    /// * `email` - The exact email of the user to authenticate.
+    /// * `password` - The clear password of the user to authenticate.
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(user))` - If a user with the specified ID exists.
-    /// * `Ok(None)` - If no user with the specified ID is found.
-    /// * `Err(anyhow::Error)` - If an error occurs during retrieval.
+    /// * `Ok(Some(user))` - If the credentials match a stored user.
+    /// * `Ok(None)` - If no user matches (unknown email, wrong or
+    ///   out-of-range password, unparsable stored hash).
+    /// * `Err(UserError)` - If a database error occurs.
     ///
     /// # Example
     ///

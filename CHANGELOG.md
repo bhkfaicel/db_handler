@@ -32,10 +32,17 @@ and this project adheres to semantic versioning.
   oversized values (over 4096 bytes) as well as a validity window where
   `expire_at` is not strictly after `created_at` are rejected before any
   SQL runs. Duplicate session storage surfaces as the existing
-  `RefreshTokenError::AlreadyExists` without overwriting or extending
-  the prior row; raw token values never reach SQL storage, returned
-  data, errors, logs, Debug output or serialization. Existing REST
-  refresh rotation behavior is unchanged.
+   `RefreshTokenError::AlreadyExists` without overwriting or extending
+   the prior row; raw token values never reach SQL storage, returned
+   data, errors, logs, Debug output or serialization. Existing REST
+   refresh rotation behavior is unchanged.
+- **Coordinated rollout (publication ordering, not a claim of current
+  compatibility):** publish 0.4.0 first; then `backend/`
+  (`rest_api_server`) bumps to it, adapts its email login and verifies
+  REST refresh rotation in its own mini-cycle; then `backend_grpc`
+  enables `users` and resumes its gated authentication work. Neither
+  consumer is already compatible with 0.4.0 — each becomes compatible
+  only through its own mini-cycle, and deployment waits for both.
 
 ### Removed
 
