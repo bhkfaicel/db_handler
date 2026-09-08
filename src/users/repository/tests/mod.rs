@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     db::connection::Connection,
     db::primary::{error::CommonError, models::SortOrder, service::Service},
+    refresh_token::service::RefreshTokenService,
     users::{model::User, service::UserService},
 };
 // The repository persists the hash it is handed, so the update fixtures
@@ -14,6 +15,8 @@ use crate::users::password::{hash_password, verify_password_async, DUMMY_ARGON2_
 // `CommonError`-based `Result` alias, which must not shadow the tests'
 // return type.
 use anyhow::{Ok, Result};
+use chrono::{Duration, Utc};
+use sqlx::Row;
 use std::time::Instant;
 
 #[tokio::test]
@@ -600,5 +603,136 @@ async fn test_update_by_id_no_fields_no_user_updated() -> Result<()> {
         .await?;
     assert!(verif_password.is_some());
     assert_eq!(verif_password.unwrap().id, id);
+    Ok(())
+}
+
+// Repository-level exact-email lookup: one bound equality query, byte-exact,
+// returning the public model (no hash field) or `None`.
+#[tokio::test]
+async fn test_get_by_email_found_not_found_and_byte_exact() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool);
+    let id = repository
+        .insert(&InternalUser::new(
+            0,
+            "username".to_string(),
+            "Exact@BHK.com".to_string(),
+            Some(hash_password("password").unwrap()),
+        ))
+        .await?;
+
+    // Exact form: found, and equal to the public model only.
+    let found = repository
+        .get_by_email("Exact@BHK.com".to_string())
+        .await?
+        .expect("exact email must resolve");
+    assert_eq!(
+        found,
+        User::new(id, "username".to_string(), "Exact@BHK.com".to_string())
+    );
+
+    // Unknown email: no user, no error.
+    assert!(repository
+        .get_by_email("ghost@bhk.com".to_string())
+        .await?
+        .is_none());
+
+    // Byte-exact discipline: case and whitespace variants are different
+    // emails; only the exact form matches.
+    for variant in [
+        "exact@bhk.com",
+        "EXACT@BHK.COM",
+        " Exact@BHK.com ",
+        "Exact@BHK.com ",
+    ] {
+        assert!(
+            repository
+                .get_by_email(variant.to_string())
+                .await?
+                .is_none(),
+            "variant {variant:?} must not match the stored email"
+        );
+    }
+    Ok(())
+}
+
+// Repository-level atomic reset: the handed-in PHC is persisted and EVERY
+// credential row of the user — refresh AND session domain — is deleted in
+// the same committed transaction. Fixtures are seeded through the public
+// refresh-token service (its private repository is out of reach here).
+#[tokio::test]
+async fn test_reset_password_revoking_tokens_success() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool.clone());
+    let tokens = RefreshTokenService::new(connection.clone());
+    let id = repository
+        .insert(&InternalUser::new(
+            0,
+            "username".to_string(),
+            "reset@bhk.com".to_string(),
+            Some(hash_password("old password").unwrap()),
+        ))
+        .await?;
+    let future = Utc::now() + Duration::hours(1);
+    tokens.add(id, "refresh-raw", future, Utc::now()).await?;
+    tokens
+        .add_session(id, "session-raw", future, Utc::now())
+        .await?;
+
+    let updated = repository
+        .reset_password_revoking_tokens("reset@bhk.com", hash_password("new password").unwrap())
+        .await?
+        .expect("the exact email must resolve to the user");
+    assert_eq!(
+        updated,
+        User::new(id, "username".to_string(), "reset@bhk.com".to_string())
+    );
+
+    // The new password authenticates, the old one no longer does.
+    assert!(repository
+        .get_by_email_and_password("reset@bhk.com".to_string(), "new password".to_string())
+        .await?
+        .is_some());
+    assert!(repository
+        .get_by_email_and_password("reset@bhk.com".to_string(), "old password".to_string())
+        .await?
+        .is_none());
+    // Both credential rows are gone from storage (raw counts through the
+    // at-rest digest forms each domain uses).
+    let rows_left = sqlx::query("SELECT COUNT(*) AS n FROM refresh_tokens WHERE user_id = ?")
+        .bind(id)
+        .fetch_one(&*pool)
+        .await?;
+    assert_eq!(rows_left.try_get::<i64, _>("n")?, 0);
+    Ok(())
+}
+
+// Repository-level unknown email: `Ok(None)` and nothing written.
+#[tokio::test]
+async fn test_reset_password_revoking_tokens_unknown_email_returns_none() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let repository = UserRepository::new(pool.clone());
+    let id = repository
+        .insert(&InternalUser::new(
+            0,
+            "username".to_string(),
+            "other@bhk.com".to_string(),
+            Some(hash_password("password").unwrap()),
+        ))
+        .await?;
+    let result = repository
+        .reset_password_revoking_tokens("ghost@bhk.com", hash_password("new password").unwrap())
+        .await?;
+    assert!(result.is_none());
+    // The existing user was not touched by the unknown-email call.
+    let user = repository.get_by_id(id as u32).await?.unwrap();
+    assert_eq!(user.email, "other@bhk.com".to_string());
+    assert!(repository
+        .get_by_email_and_password("other@bhk.com".to_string(), "password".to_string())
+        .await?
+        .is_some());
     Ok(())
 }

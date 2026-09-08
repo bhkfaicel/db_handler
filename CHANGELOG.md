@@ -36,13 +36,41 @@ and this project adheres to semantic versioning.
    the prior row; raw token values never reach SQL storage, returned
    data, errors, logs, Debug output or serialization. Existing REST
    refresh rotation behavior is unchanged.
+- Public atomic password reset and exact email lookup on `UserService`
+  (additive, behind the `users` feature): `get_by_email(email)` resolves an
+  account with ONE bound, byte-exact SQL equality query (`WHERE email = ?`)
+  — no trimming, lowercasing or case folding, no pagination, no in-memory
+  scan — and returns the public user model, which never contains password
+  hash material (`Ok(None)` for an unknown exact email).
+  `reset_password_revoking_tokens(email, new_password)` validates the new
+  password against the 8–128-byte policy and hashes it with Argon2id BEFORE
+  the database transaction opens (no SQLite write lock is held during the
+  memory-hard hashing), then ONE transaction performs the exact-email
+  lookup, the password update and the deletion of every `refresh_tokens`
+  row of the user. That deletion is deliberately unscoped by token domain:
+  a password reset is a user-lifecycle event that must invalidate BOTH the
+  REST refresh tokens and the gRPC sessions of the account, unlike the
+  domain-scoped sweeps. Any failure — lookup, update, deletion or commit —
+  rolls the whole transaction back, leaving the old password authenticating
+  and every credential row intact. Out-of-range passwords are rejected with
+  the typed `UserError::InvalidInput` before any SQL; an unknown email
+  returns the newly (re)introduced typed `UserError::NotFoundByEmail` and
+  writes nothing — a typed answer that is safe on this provisioning surface,
+  unlike the login path, which must keep account existence
+  indistinguishable. Provisioning consumers (notably `backend_grpc`) should
+  use this single operation instead of composing a password update with a
+  separate revocation call, which leaves stolen sessions alive when
+  revocation fails after the password change.
 - **Coordinated rollout (publication ordering, not a claim of current
   compatibility):** publish 0.4.0 first; then `backend/`
   (`rest_api_server`) bumps to it, adapts its email login and verifies
   REST refresh rotation in its own mini-cycle; then `backend_grpc`
-  enables `users` and resumes its gated authentication work. Neither
-  consumer is already compatible with 0.4.0 — each becomes compatible
-  only through its own mini-cycle, and deployment waits for both.
+  enables `users`, resumes its gated authentication work and consumes
+  the new exact lookup and atomic reset operation (instead of composing
+  update plus revocation or filtering paginated listings in memory).
+  Neither consumer is already compatible with 0.4.0 — each becomes
+  compatible only through its own mini-cycle, and deployment waits for
+  both.
 
 ### Removed
 

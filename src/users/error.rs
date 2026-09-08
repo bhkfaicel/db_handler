@@ -19,6 +19,20 @@ pub enum UserError {
     /// Email already exists.
     #[error("Email already exists: {0}")]
     EmailAlreadyExists(String),
+
+    /// No user exists for the exact email targeted by a provisioning or
+    /// reset operation.
+    ///
+    /// Deliberately typed (not an opaque operation string) because the
+    /// reset/provisioning path NEEDS to tell the operator "this account
+    /// does not exist": unlike the login path — which must never reveal
+    /// account existence and therefore burns dummy Argon2 work and reports
+    /// a uniform `None` — a password reset is an administrative
+    /// provisioning surface where the caller is already asking whether the
+    /// account exists, so the typed answer leaks nothing the caller does
+    /// not already control.
+    #[error("No user found for email: {0}")]
+    NotFoundByEmail(String),
 }
 
 /// Result type for user operations.

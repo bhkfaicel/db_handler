@@ -161,6 +161,26 @@ Login runs exactly one Argon2id verification (unknown emails burn the same
 work against a fixed dummy hash, so response timing cannot reveal whether an
 account exists).
 
+**Password reset and exact lookup (additive).** `UserService` gains
+`get_by_email(email) -> Result<Option<User>>` — one bound, byte-exact SQL
+equality lookup (`WHERE email = ?`): no trimming, lowercasing or case
+folding, no pagination, no in-memory scan; the returned public model carries
+no password hash. It also gains
+`reset_password_revoking_tokens(email, new_password) -> Result<User>`: the
+new password is validated (8–128 bytes, else the typed `InvalidInput`)
+and Argon2id-hashed before the database transaction opens, then ONE
+transaction performs the exact-email lookup, the password update and the
+deletion of every `refresh_tokens` row of the user. That deletion is
+deliberately unscoped by token domain: a password reset is a user-lifecycle
+event that must invalidate BOTH the REST refresh tokens and the gRPC
+sessions of the account, unlike every domain-scoped sweep above. Any
+failure — lookup, update, deletion or commit — rolls the whole transaction
+back: the old password keeps authenticating and every credential row
+survives. An unknown email returns the typed `UserError::NotFoundByEmail`
+and writes nothing; that typed answer is safe to expose on this
+provisioning surface, because unlike the login path it does not have to
+hide account existence from callers that explicitly target one account.
+
 **gRPC sessions (additive).** `RefreshTokenService` gains `add_session`,
 `validate_session`, `revoke_session`, `revoke_all_sessions` and
 `cleanup_expired_sessions`. The library never generates tokens: the caller
@@ -184,7 +204,10 @@ and the same raw value can exist in both domains as two distinct rows.
 **Coordinated rollout.** Publish 0.4.0 first. Then `backend/`
 (`rest_api_server`) bumps to it, adapts its email login and re-verifies REST
 refresh rotation in its own mini-cycle. Then `backend_grpc` enables `users`
-and resumes its gated authentication work. **Neither consumer is compatible
+and resumes its gated authentication work, consuming
+`UserService::get_by_email` and `UserService::reset_password_revoking_tokens`
+instead of composing a password update with a separate revocation call or
+filtering paginated listings in memory. **Neither consumer is compatible
 with 0.4.0 until its own mini-cycle completes**, and deployment waits for
 both.
 

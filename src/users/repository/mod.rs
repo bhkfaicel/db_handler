@@ -114,6 +114,104 @@ impl UserRepository {
         }
     }
 
+    /// Exact-email lookup (byte-exact, parameterized).
+    ///
+    /// One bound equality query (`WHERE email = ?`) with the same SQLite
+    /// byte-exact semantics as the login path: no trimming, no lowercasing,
+    /// no case folding, no pagination, no in-memory scan. Returns the
+    /// public model, which structurally carries no password hash.
+    ///
+    /// Uses the runtime query API (like the tests' raw-row helpers): the
+    /// compile-time macro would need a freshly generated `.sqlx` artifact,
+    /// while the runtime API is offline-mode independent; every statement
+    /// added here is exercised by the adjacent tests.
+    pub(crate) async fn get_by_email(&self, email: String) -> Result<Option<User>> {
+        sqlx::query_as::<_, User>("SELECT id, username, email FROM users WHERE email = ?")
+            .bind(email)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(map_sqlx_to_common_error)
+    }
+
+    /// Atomic password reset invalidating every bearer credential of the
+    /// user across BOTH token domains.
+    ///
+    /// ONE transaction, in order:
+    /// 1. exact byte-comparable email lookup inside the transaction —
+    ///    an unknown email writes nothing and reports `Ok(None)`;
+    /// 2. `UPDATE users SET password_hash = ? WHERE id = ?` to the
+    ///    freshly generated Argon2id PHC the service hands in;
+    /// 3. `DELETE FROM refresh_tokens WHERE user_id = ?` — deliberately
+    ///    UNSCOPED by domain (no `grpc-session:` predicate): a password
+    ///    reset must kill both the REST refresh rows AND the gRPC session
+    ///    rows of the user, unlike every other per-user sweep in this
+    ///    crate which is domain-scoped on purpose;
+    /// 4. COMMIT.
+    ///
+    /// Any lookup/update/deletion/commit error aborts the whole
+    /// transaction (sqlx rolls the open transaction back on drop), leaving
+    /// the old password and every refresh/session row intact. The
+    /// memory-hard Argon2 derivation has already happened in the service,
+    /// BEFORE this transaction opens, so no SQLite write lock is held
+    /// during hashing.
+    ///
+    /// Returns the updated public user model (structurally hash-free), or
+    /// `Ok(None)` when the exact email matches no user.
+    ///
+    /// Runtime query API for the same offline-artifact independence reason
+    /// as `get_by_email` above; every statement is exercised by the
+    /// adjacent tests.
+    pub(crate) async fn reset_password_revoking_tokens(
+        &self,
+        email: &str,
+        // Already Argon2id-hashed by the service: hashing is domain logic
+        // and must stay outside the open transaction (no write lock is
+        // held during memory-hard hashing). The repository only persists
+        // the hash it is handed.
+        password_hash: String,
+    ) -> Result<Option<User>> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_to_common_error)?;
+
+        // 1. Exact-email lookup inside the transaction (byte-comparable,
+        //    bound parameter — same semantics as the login lookup).
+        let record =
+            sqlx::query_as::<_, User>("SELECT id, username, email FROM users WHERE email = ?")
+                .bind(email)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_to_common_error)?;
+
+        let Some(record) = record else {
+            // Unknown email: nothing has been written; returning here
+            // drops the open transaction and rolls it back.
+            return Ok(None);
+        };
+
+        // 2. Password update inside the same transaction.
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(password_hash)
+            .bind(record.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+
+        // 3. Cross-domain credential invalidation inside the same
+        //    transaction: NO domain predicate here on purpose — both the
+        //    refresh-domain and session-domain rows of this user are
+        //    deleted, matching refresh replay-invalidation semantics.
+        sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?")
+            .bind(record.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+
+        // 4. Commit: only now are the password change and the token
+        //    purge visible together.
+        tx.commit().await.map_err(map_sqlx_to_common_error)?;
+
+        Ok(Some(record))
+    }
+
     pub(crate) async fn get_by_email_and_password(
         &self,
         email: String,

@@ -2,9 +2,26 @@ use super::*;
 use crate::{
     db::connection::Connection,
     db::primary::{models::SortOrder, service::Service},
+    refresh_token::{error::RotationOutcome, service::RefreshTokenService},
     users::model::UserSortKey,
 };
 use anyhow::Result;
+use chrono::{Duration, Utc};
+use sha2::{Digest, Sha256};
+use sqlx::Row;
+
+// Independent session-digest computation (sha2 directly, not a repository
+// helper): at rest a session row stores `grpc-session:<sha256(raw)>`, and
+// raw-count assertions from this test module must not depend on the
+// private refresh-token internals — the same non-circular technique the
+// refresh-token tests use.
+fn session_digest_of(raw: &str) -> String {
+    let hex: String = Sha256::digest(raw.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("grpc-session:{hex}")
+}
 
 #[tokio::test]
 async fn test_add_user() -> Result<()> {
@@ -417,5 +434,380 @@ async fn test_get_by_email_and_password_out_of_range_password_uniform_none() -> 
         .get_by_email_and_password("uniform@bhk.com".to_string(), "password".to_string())
         .await?
         .is_some());
+    Ok(())
+}
+
+// Exact-email lookup through the public API: the user is found by its
+// byte-exact email and the returned model is the public one (id, username,
+// email) — it structurally carries no password-hash field at all.
+#[tokio::test]
+async fn test_get_by_email_finds_user_without_hash_material() -> Result<()> {
+    let connection = Connection::new().await?;
+    let service = UserService::new(connection.clone());
+    let id = service
+        .add(
+            "username".to_string(),
+            "lookup@bhk.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    let found = service
+        .get_by_email("lookup@bhk.com".to_string())
+        .await?
+        .expect("exact email must resolve to the user");
+    assert_eq!(
+        found,
+        User::new(id, "username".to_string(), "lookup@bhk.com".to_string())
+    );
+    Ok(())
+}
+
+// An email that matches no user reports `Ok(None)` — a lookup, not an
+// error (the typed not-found error is reserved for the reset path).
+#[tokio::test]
+async fn test_get_by_email_unknown_returns_none() -> Result<()> {
+    let connection = Connection::new().await?;
+    let service = UserService::new(connection.clone());
+    assert!(service
+        .get_by_email("ghost@bhk.com".to_string())
+        .await?
+        .is_none());
+    Ok(())
+}
+
+// Email lookups stay BYTE-EXACT on the plain lookup too: case and
+// whitespace variants are different emails, only the exact form matches.
+#[tokio::test]
+async fn test_get_by_email_is_byte_exact() -> Result<()> {
+    let connection = Connection::new().await?;
+    let service = UserService::new(connection.clone());
+    service
+        .add(
+            "username".to_string(),
+            "Mixed@Example.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    // Lowercased, uppercased, trailing and leading whitespace variants:
+    // each is a different email, no user.
+    for variant in [
+        "mixed@example.com",
+        "MIXED@EXAMPLE.COM",
+        "Mixed@Example.com ",
+        " Mixed@Example.com",
+    ] {
+        assert!(
+            service.get_by_email(variant.to_string()).await?.is_none(),
+            "variant {variant:?} must not match the stored email"
+        );
+    }
+    // The byte-exact form matches.
+    assert!(service
+        .get_by_email("Mixed@Example.com".to_string())
+        .await?
+        .is_some());
+    Ok(())
+}
+
+// Reset policy gate: 7- and 129-byte passwords are rejected with the typed
+// input error BEFORE any hashing or SQL runs — the old password still
+// authenticates and every live credential of the user survives untouched.
+#[tokio::test]
+async fn test_reset_password_rejects_out_of_range_passwords_before_sql() -> Result<()> {
+    let connection = Connection::new().await?;
+    let service = UserService::new(connection.clone());
+    let tokens = RefreshTokenService::new(connection.clone());
+    let user_id = service
+        .add(
+            "username".to_string(),
+            "bounds@bhk.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    let future = Utc::now() + Duration::hours(1);
+    tokens
+        .add(user_id, "refresh-raw", future, Utc::now())
+        .await?;
+    tokens
+        .add_session(user_id, "session-raw", future, Utc::now())
+        .await?;
+
+    let too_short = service
+        .reset_password_revoking_tokens("bounds@bhk.com".to_string(), "a".repeat(7))
+        .await;
+    let too_long = service
+        .reset_password_revoking_tokens("bounds@bhk.com".to_string(), "a".repeat(129))
+        .await;
+    assert!(
+        matches!(&too_short, Err(UserError::InvalidInput(_))),
+        "expected UserError::InvalidInput for 7 bytes, got: {too_short:?}"
+    );
+    assert!(
+        matches!(&too_long, Err(UserError::InvalidInput(_))),
+        "expected UserError::InvalidInput for 129 bytes, got: {too_long:?}"
+    );
+
+    // No side effect at all: the old password authenticates and both live
+    // credentials still operate.
+    assert!(service
+        .get_by_email_and_password("bounds@bhk.com".to_string(), "password".to_string())
+        .await?
+        .is_some());
+    assert!(matches!(
+        tokens
+            .rotate(user_id, "refresh-raw", "x", future, Utc::now())
+            .await?,
+        RotationOutcome::Rotated(_)
+    ));
+    assert_eq!(tokens.validate_session("session-raw").await?, Some(user_id));
+    Ok(())
+}
+
+// Unknown reset email: the dedicated typed not-found error, and no side
+// effect anywhere — an existing user's password and live credentials are
+// untouched (nothing is written for an email that matches no user).
+#[tokio::test]
+async fn test_reset_password_unknown_email_typed_error_without_side_effects() -> Result<()> {
+    let connection = Connection::new().await?;
+    let service = UserService::new(connection.clone());
+    let tokens = RefreshTokenService::new(connection.clone());
+    let user_id = service
+        .add(
+            "username".to_string(),
+            "present@bhk.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    let future = Utc::now() + Duration::hours(1);
+    tokens
+        .add(user_id, "refresh-raw", future, Utc::now())
+        .await?;
+    tokens
+        .add_session(user_id, "session-raw", future, Utc::now())
+        .await?;
+
+    let result = service
+        .reset_password_revoking_tokens("ghost@bhk.com".to_string(), "new password".to_string())
+        .await;
+    assert!(
+        matches!(
+            &result,
+            Err(UserError::NotFoundByEmail(email)) if email == "ghost@bhk.com"
+        ),
+        "expected UserError::NotFoundByEmail, got: {result:?}"
+    );
+
+    // The existing user kept everything.
+    assert!(service
+        .get_by_email_and_password("present@bhk.com".to_string(), "password".to_string())
+        .await?
+        .is_some());
+    assert!(matches!(
+        tokens
+            .rotate(user_id, "refresh-raw", "x", future, Utc::now())
+            .await?,
+        RotationOutcome::Rotated(_)
+    ));
+    assert_eq!(tokens.validate_session("session-raw").await?, Some(user_id));
+    Ok(())
+}
+
+// Success path: the password change and the deletion of EVERY credential
+// row of the user — REST refresh rows AND session rows — commit together,
+// and stay strictly scoped to the target user (another user's credentials
+// keep working).
+#[tokio::test]
+async fn test_reset_password_revokes_both_domains_with_user_isolation() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let service = UserService::new(connection.clone());
+    let tokens = RefreshTokenService::new(connection.clone());
+    let user_a = service
+        .add(
+            "alice".to_string(),
+            "alice@bhk.com".to_string(),
+            "old password".to_string(),
+        )
+        .await?;
+    let user_b = service
+        .add(
+            "bob".to_string(),
+            "bob@bhk.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    let future = Utc::now() + Duration::hours(1);
+    tokens.add(user_a, "a-refresh", future, Utc::now()).await?;
+    tokens
+        .add_session(user_a, "a-session", future, Utc::now())
+        .await?;
+    tokens.add(user_b, "b-refresh", future, Utc::now()).await?;
+    tokens
+        .add_session(user_b, "b-session", future, Utc::now())
+        .await?;
+
+    let reset_user = service
+        .reset_password_revoking_tokens("alice@bhk.com".to_string(), "new password".to_string())
+        .await?;
+    assert_eq!(
+        reset_user,
+        User::new(user_a, "alice".to_string(), "alice@bhk.com".to_string())
+    );
+
+    // Alice: the old password fails, the new one passes.
+    assert!(service
+        .get_by_email_and_password("alice@bhk.com".to_string(), "old password".to_string())
+        .await?
+        .is_none());
+    assert!(service
+        .get_by_email_and_password("alice@bhk.com".to_string(), "new password".to_string())
+        .await?
+        .is_some());
+    // Alice: the refresh row is GONE — rotation classifies NotFound (a
+    // merely revoked row would still exist and classify as reuse).
+    let a_refresh = tokens
+        .rotate(user_a, "a-refresh", "x", future, Utc::now())
+        .await?;
+    assert_eq!(a_refresh, RotationOutcome::NotFound);
+    // Alice: the session row is GONE from storage, not just revoked (raw
+    // count through the domain-tagged digest boundary the storage uses).
+    let a_session_rows =
+        sqlx::query("SELECT COUNT(*) AS n FROM refresh_tokens WHERE user_id = ? AND token = ?")
+            .bind(user_a)
+            .bind(session_digest_of("a-session"))
+            .fetch_one(&*pool)
+            .await?;
+    assert_eq!(a_session_rows.try_get::<i64, _>("n")?, 0);
+    assert_eq!(tokens.validate_session("a-session").await?, None);
+
+    // Bob: strictly untouched in both domains.
+    assert!(service
+        .get_by_email_and_password("bob@bhk.com".to_string(), "password".to_string())
+        .await?
+        .is_some());
+    assert!(matches!(
+        tokens
+            .rotate(user_b, "b-refresh", "x", future, Utc::now())
+            .await?,
+        RotationOutcome::Rotated(_)
+    ));
+    assert_eq!(tokens.validate_session("b-session").await?, Some(user_b));
+    Ok(())
+}
+
+// The SAME raw value stored in both domains for one user is invalidated in
+// BOTH domains by one reset (and it took two distinct rows to store it: the
+// domain-separation storage identity, unaffected by the reset path).
+#[tokio::test]
+async fn test_reset_password_invalidates_same_raw_token_in_both_domains() -> Result<()> {
+    let connection = Connection::new().await?;
+    let service = UserService::new(connection.clone());
+    let tokens = RefreshTokenService::new(connection.clone());
+    let user_id = service
+        .add(
+            "username".to_string(),
+            "dual@bhk.com".to_string(),
+            "password".to_string(),
+        )
+        .await?;
+    let future = Utc::now() + Duration::hours(1);
+    tokens.add(user_id, "same-raw", future, Utc::now()).await?;
+    tokens
+        .add_session(user_id, "same-raw", future, Utc::now())
+        .await?;
+
+    service
+        .reset_password_revoking_tokens("dual@bhk.com".to_string(), "new password".to_string())
+        .await?;
+
+    // Both domains report the credential unusable.
+    let refresh = tokens
+        .rotate(user_id, "same-raw", "x", future, Utc::now())
+        .await?;
+    assert_eq!(refresh, RotationOutcome::NotFound);
+    assert_eq!(tokens.validate_session("same-raw").await?, None);
+    Ok(())
+}
+
+// Atomic rollback under database-enforced failure injection: a test-only
+// SQLite trigger aborts any deletion from refresh_tokens for the target
+// user, so the reset's cross-domain invalidation fails AFTER the password
+// UPDATE ran inside the open transaction. The error must propagate and the
+// whole transaction roll back: old password still authenticates, the new
+// one does not, and both pre-existing live credentials still operate. The
+// trigger is removed afterwards (asserted gone), leaving no test residue.
+#[tokio::test]
+async fn test_reset_password_rolls_back_when_token_invalidation_fails() -> Result<()> {
+    let connection = Connection::new().await?;
+    let pool = connection.primary_db_client().clone();
+    let service = UserService::new(connection.clone());
+    let tokens = RefreshTokenService::new(connection.clone());
+    let user_id = service
+        .add(
+            "username".to_string(),
+            "rollback@bhk.com".to_string(),
+            "old password".to_string(),
+        )
+        .await?;
+    let future = Utc::now() + Duration::hours(1);
+    tokens
+        .add(user_id, "refresh-raw", future, Utc::now())
+        .await?;
+    tokens
+        .add_session(user_id, "session-raw", future, Utc::now())
+        .await?;
+
+    // Test-only failure injection: SQLite ABORTs any deletion from
+    // refresh_tokens belonging to the target user. The user id comes from
+    // this test's own fixture (never caller input), so inlining it into
+    // the trigger definition is safe; parameters are not allowed inside
+    // trigger bodies anyway.
+    sqlx::query(&format!(
+        "CREATE TRIGGER reset_rollback_injector \
+         BEFORE DELETE ON refresh_tokens \
+         WHEN OLD.user_id = {user_id} \
+         BEGIN SELECT RAISE(ABORT, 'injected refresh_tokens delete failure'); END;"
+    ))
+    .execute(&*pool)
+    .await?;
+
+    let result = service
+        .reset_password_revoking_tokens("rollback@bhk.com".to_string(), "new password".to_string())
+        .await;
+    assert!(
+        matches!(&result, Err(UserError::Common(CommonError::Database(_)))),
+        "the injected invalidation failure must propagate as a database error, got: {result:?}"
+    );
+
+    // Remove the trigger BEFORE probing the post-rollback world.
+    sqlx::query("DROP TRIGGER reset_rollback_injector")
+        .execute(&*pool)
+        .await?;
+    let triggers_left = sqlx::query(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name = 'reset_rollback_injector'",
+    )
+    .fetch_one(&*pool)
+    .await?;
+    assert_eq!(triggers_left.try_get::<i64, _>("n")?, 0);
+
+    // The password UPDATE was rolled back: old password authenticates,
+    // the new one does not.
+    assert!(service
+        .get_by_email_and_password("rollback@bhk.com".to_string(), "old password".to_string())
+        .await?
+        .is_some());
+    assert!(service
+        .get_by_email_and_password("rollback@bhk.com".to_string(), "new password".to_string())
+        .await?
+        .is_none());
+    // Both pre-existing live credentials still operate: the refresh token
+    // rotates (proof the row was never deleted) and the session validates.
+    assert!(matches!(
+        tokens
+            .rotate(user_id, "refresh-raw", "rotated", future, Utc::now())
+            .await?,
+        RotationOutcome::Rotated(_)
+    ));
+    assert_eq!(tokens.validate_session("session-raw").await?, Some(user_id));
     Ok(())
 }
