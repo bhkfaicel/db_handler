@@ -59,7 +59,7 @@ impl Repository {
         let point = SensorDataPoint::new("sensor_data".to_string(), tags, fields);
         let line_protocol = render_line_protocol(&point)?;
         log::debug!("Line protocol created successfully, writing to InfluxDB...");
-        match self.client.write(&bucket, &line_protocol).await {
+        match self.client.write(&bucket, line_protocol).await {
             Ok(_) => {
                 // Hot path: this line runs on every successful sensor event,
                 // so success details stay at debug level (info would pay a
@@ -87,14 +87,16 @@ impl Repository {
 
 /// Converts a sensor point to InfluxDB line protocol.
 fn render_line_protocol(point: &SensorDataPoint) -> Result<String> {
-    let mut line = format!(
-        "{},product_type={},sensor_id={},sensor_mac={} ",
-        escape_key(&point.measurement),
-        escape_key(&point.tags.product_type.to_string()),
-        point.tags.sensor_id,
-        escape_key(&point.tags.sensor_mac)
-    );
-    let mut fields = Vec::new();
+    let mut line = String::with_capacity(160);
+    write_escaped_key(&mut line, &point.measurement);
+    write!(
+        line,
+        ",product_type={},sensor_id={},sensor_mac=",
+        point.tags.product_type, point.tags.sensor_id
+    )
+    .expect("writing to a String cannot fail");
+    write_escaped_key(&mut line, &point.tags.sensor_mac);
+    line.push(' ');
 
     // Add fields based on the sensor type.
     match &point.fields {
@@ -103,14 +105,14 @@ fn render_line_protocol(point: &SensorDataPoint) -> Result<String> {
             vibration_count,
             sensor_timestamp,
         } => {
-            fields.push(format!("is_open={is_open}"));
+            write!(line, "is_open={is_open}").expect("writing to a String cannot fail");
             if let Some(vc) = vibration_count {
-                fields.push(format!("vibration_count={}i", vc.count));
-                fields.push(format!("vibration_time_window={}i", vc.time_window));
-                fields.push(format!(
-                    "vibration_time_unit=\"{}\"",
-                    escape_string(&vc.unit.to_string())
-                ));
+                write!(
+                    line,
+                    ",vibration_count={}i,vibration_time_window={}i,vibration_time_unit=\"{}\"",
+                    vc.count, vc.time_window, vc.unit
+                )
+                .expect("writing to a String cannot fail");
             }
             if let Some(timestamp) = sensor_timestamp {
                 // An out-of-range timestamp must fail loudly: silently
@@ -121,11 +123,11 @@ fn render_line_protocol(point: &SensorDataPoint) -> Result<String> {
                         timestamp
                     ))
                 })?;
-                fields.push(format!("sensor_timestamp={timestamp_ns}i"));
+                write!(line, ",sensor_timestamp={timestamp_ns}i")
+                    .expect("writing to a String cannot fail");
             }
         }
     }
-    line.push_str(&fields.join(","));
 
     // Add timestamp (convert DateTime<Utc> to nanoseconds since epoch); an
     // out-of-range value is a data error reported as `InvalidFormat`, never
@@ -141,36 +143,55 @@ fn render_line_protocol(point: &SensorDataPoint) -> Result<String> {
 }
 
 /// Escapes measurement and tag keys according to InfluxDB line protocol.
-fn escape_key(value: &str) -> String {
-    escape_chars(value, |character| match character {
+fn write_escaped_key(output: &mut String, value: &str) {
+    write_escaped(output, value, |character| match character {
         '\\' => Some("\\\\"),
         ',' => Some("\\,"),
         ' ' => Some("\\ "),
         '=' => Some("\\="),
         _ => None,
-    })
+    });
+}
+
+/// Returns an escaped key for direct formatter compatibility tests.
+#[cfg(test)]
+fn escape_key(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    write_escaped_key(&mut escaped, value);
+    escaped
 }
 
 /// Escapes a string field according to InfluxDB line protocol.
+#[cfg(test)]
 fn escape_string(value: &str) -> String {
-    escape_chars(value, |character| match character {
+    let mut escaped = String::with_capacity(value.len());
+    write_escaped_string(&mut escaped, value);
+    escaped
+}
+
+/// Escapes a string field directly into the final line-protocol buffer.
+#[cfg(test)]
+fn write_escaped_string(output: &mut String, value: &str) {
+    write_escaped(output, value, |character| match character {
         '\\' => Some("\\\\"),
         '"' => Some("\\\""),
         _ => None,
-    })
+    });
 }
 
-/// Escapes selected characters without allocating intermediate strings.
-fn escape_chars(value: &str, replacement: impl Fn(char) -> Option<&'static str>) -> String {
-    let mut escaped = String::with_capacity(value.len());
+/// Writes escaped characters without allocating intermediate strings.
+fn write_escaped(
+    output: &mut String,
+    value: &str,
+    replacement: impl Fn(char) -> Option<&'static str>,
+) {
     for character in value.chars() {
         if let Some(replacement) = replacement(character) {
-            escaped.push_str(replacement);
+            output.push_str(replacement);
         } else {
-            escaped.push(character);
+            output.push(character);
         }
     }
-    escaped
 }
 
 #[cfg(test)]

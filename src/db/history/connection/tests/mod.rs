@@ -54,7 +54,7 @@ async fn write_sends_expected_influx_request() -> Result<()> {
     client
         .write(
             "sensor bucket",
-            "sensor_data,product_type=ContactSensor,is_open=true 123",
+            "sensor_data,product_type=ContactSensor,is_open=true 123".to_string(),
         )
         .await?;
 
@@ -88,7 +88,9 @@ async fn write_rejects_http_error_status() -> Result<()> {
         "org".to_string(),
         "token".to_string(),
     );
-    let result = client.write("bucket", "sensor_data value=1i 1").await;
+    let result = client
+        .write("bucket", "sensor_data value=1i 1".to_string())
+        .await;
 
     assert!(result.is_err(), "HTTP 500 must fail the history write");
     server.join().expect("the error server must finish")?;
@@ -146,7 +148,9 @@ async fn hung_influx_server_write_fails_through_request_timeout() -> Result<()> 
     let started = Instant::now();
     // Minimal line protocol: content is irrelevant, the request is cut off
     // by the timeout before any server-side processing.
-    let write = client.write(&bucket, "timeout_probe value=1i 1").await;
+    let write = client
+        .write(&bucket, "timeout_probe value=1i 1".to_string())
+        .await;
     let elapsed = started.elapsed();
 
     assert!(

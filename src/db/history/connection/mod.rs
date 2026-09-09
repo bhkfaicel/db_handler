@@ -29,7 +29,7 @@ impl HistoryDbClient {
     }
 
     /// Writes one or more InfluxDB line-protocol records to the configured bucket.
-    pub async fn write(&self, bucket: &str, body: &str) -> Result<()> {
+    pub async fn write(&self, bucket: &str, body: String) -> Result<()> {
         let mut endpoint = self.base_url.clone();
         endpoint.set_path("/api/v2/write");
         endpoint.set_query(None);
@@ -44,7 +44,7 @@ impl HistoryDbClient {
             .bearer_auth(&self.token)
             .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
             .header(reqwest::header::CONTENT_LENGTH, body.len())
-            .body(body.to_owned())
+            .body(body)
             .send()
             .await?
             .error_for_status()?;

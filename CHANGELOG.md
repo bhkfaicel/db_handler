@@ -85,6 +85,8 @@ and this project adheres to semantic versioning.
   requests retain the configured URL, organization, bucket, bearer token,
   nanosecond timestamps, timeout policy, and line-protocol behavior. The
   migration includes request-level and exact serializer compatibility tests.
+  The serializer writes directly into one bounded buffer and transfers the
+  completed body into the shared HTTP client without an extra body copy.
   lockfile-only `rsa` advisory remains deferred because `sqlx-mysql` is not
   active and no fixed `rsa` release exists; the branch workflow ignores only
   this advisory through its explicit `cargo audit` input.
