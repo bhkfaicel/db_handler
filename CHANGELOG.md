@@ -87,6 +87,8 @@ and this project adheres to semantic versioning.
   lockfile-only `rsa` advisory remains deferred because `sqlx-mysql` is not
   active and no fixed `rsa` release exists; the branch workflow ignores only
   this advisory through its explicit `cargo audit` input.
+- Removed the unused direct `futures` dependency identified after the
+  transport migration.
 - SQLx now disables unused default database drivers and resolves only the
   SQLite feature set required by this crate, reducing the active dependency
   graph without changing the public database API.
