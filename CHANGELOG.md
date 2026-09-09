@@ -80,6 +80,9 @@ and this project adheres to semantic versioning.
 
 ### Changed
 
+- SQLx now disables unused default database drivers and resolves only the
+  SQLite feature set required by this crate, reducing the active dependency
+  graph without changing the public database API.
 - **Breaking:** user passwords are now hashed with Argon2id (RustCrypto,
   default parameters `v=19, m=19456, t=2, p=1`) and stored as standard PHC
   strings with a unique OS-CSPRNG salt per hash, replacing bcrypt.
