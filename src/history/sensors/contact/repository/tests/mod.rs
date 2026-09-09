@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use crate::db::history::connection::HistoryDbClient;
 
-use super::{render_line_protocol, Repository};
+use super::{escape_key, escape_string, render_line_protocol, Repository};
 use crate::history::sensors::error::SensorHistoryError;
-use crate::history::sensors::model::fields::SensorFields;
+use crate::history::sensors::model::fields::{SensorFields, TimeUnit, VibrationCount};
 use crate::history::sensors::model::point::SensorDataPoint;
 use crate::history::sensors::model::tags::SensorTags;
 use crate::sensors::model::ProductType;
@@ -76,6 +76,50 @@ fn invalid_sensor_timestamp_yields_invalid_format() {
     };
     let error = render_line_protocol(&point).unwrap_err();
     assert_invalid_format(error);
+}
+
+/// Asserts the exact line protocol for a minimal contact point.
+#[test]
+fn renders_minimal_contact_point() {
+    let timestamp = DateTime::from_timestamp(1, 2).expect("static timestamp must be valid");
+    let line = render_line_protocol(&contact_point(timestamp)).expect("point must render");
+
+    assert_eq!(
+        line,
+        "sensor_data,product_type=ContactSensor,sensor_id=1,sensor_mac=AA:BB:CC:DD:EE:FF is_open=true 1000000002"
+    );
+}
+
+/// Asserts the exact line protocol for every optional contact field.
+#[test]
+fn renders_optional_contact_fields_and_sensor_timestamp() {
+    let mut point = contact_point(DateTime::from_timestamp(1, 2).unwrap());
+    point.fields = SensorFields::Contact {
+        is_open: false,
+        vibration_count: Some(VibrationCount {
+            count: 2,
+            time_window: 3,
+            unit: TimeUnit::Seconds,
+        }),
+        sensor_timestamp: Some(DateTime::from_timestamp(4, 5).unwrap()),
+    };
+
+    let line = render_line_protocol(&point).expect("point must render");
+
+    assert_eq!(
+        line,
+        "sensor_data,product_type=ContactSensor,sensor_id=1,sensor_mac=AA:BB:CC:DD:EE:FF is_open=false,vibration_count=2i,vibration_time_window=3i,vibration_time_unit=\"seconds\",sensor_timestamp=4000000005i 1000000002"
+    );
+}
+
+/// Asserts escaping for measurement/tag keys and quoted string fields.
+#[test]
+fn escapes_line_protocol_keys_and_strings() {
+    assert_eq!(
+        escape_key(r"measurement, key=value"),
+        r"measurement\,\ key\=value"
+    );
+    assert_eq!(escape_string(r#"seconds\"value"#), r#"seconds\\\"value"#);
 }
 
 /// The constructor stores the provided shared client and the provided
