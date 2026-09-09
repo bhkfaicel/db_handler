@@ -80,6 +80,13 @@ and this project adheres to semantic versioning.
 
 ### Changed
 
+- History writes now use a direct `reqwest 0.13` HTTP/1.1 Rustls transport
+  instead of the unmaintained `influxdb2` client stack. InfluxDB v2 write
+  requests retain the configured URL, organization, bucket, bearer token,
+  nanosecond timestamps, timeout policy, and line-protocol behavior. The
+  lockfile-only `rsa` advisory remains deferred because `sqlx-mysql` is not
+  active and no fixed `rsa` release exists; the branch workflow ignores only
+  this advisory through its explicit `cargo audit` input.
 - SQLx now disables unused default database drivers and resolves only the
   SQLite feature set required by this crate, reducing the active dependency
   graph without changing the public database API.

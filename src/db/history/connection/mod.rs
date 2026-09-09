@@ -1,8 +1,56 @@
 use crate::common::helpers::config::HomeIotConfig;
 use anyhow::{bail, Context, Result};
-use influxdb2::Client;
+use reqwest::Client;
 use std::time::Duration;
 use url::Url;
+
+/// HTTP client for the InfluxDB v2 line-protocol write endpoint.
+#[derive(Clone)]
+pub struct HistoryDbClient {
+    /// Configured HTTP transport with bounded connection and request waits.
+    client: Client,
+    /// InfluxDB server URL without the write endpoint path.
+    base_url: Url,
+    /// InfluxDB organization used for writes.
+    org: String,
+    /// InfluxDB bearer token used for writes.
+    token: String,
+}
+
+impl HistoryDbClient {
+    /// Creates a client with an already validated base URL and HTTP transport.
+    pub fn new(client: Client, base_url: Url, org: String, token: String) -> Self {
+        Self {
+            client,
+            base_url,
+            org,
+            token,
+        }
+    }
+
+    /// Writes one or more InfluxDB line-protocol records to the configured bucket.
+    pub async fn write(&self, bucket: &str, body: &str) -> Result<()> {
+        let mut endpoint = self.base_url.clone();
+        endpoint.set_path("/api/v2/write");
+        endpoint.set_query(None);
+        endpoint
+            .query_pairs_mut()
+            .append_pair("org", &self.org)
+            .append_pair("bucket", bucket)
+            .append_pair("precision", "ns");
+
+        self.client
+            .post(endpoint)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(reqwest::header::CONTENT_LENGTH, body.len())
+            .body(body.to_owned())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+}
 
 /// Initializes and returns a time-series database client.
 ///
@@ -31,7 +79,7 @@ use url::Url;
 ///
 /// # Returns
 ///
-/// * `Ok((Client, bucket_name))` - Client created successfully together
+/// * `Ok((HistoryDbClient, bucket_name))` - Client created successfully together
 ///   with the configured InfluxDB bucket name that history writes target
 /// * `Err(anyhow::Error)` - If configuration or client creation fails
 ///
@@ -49,7 +97,7 @@ use url::Url;
 pub(crate) async fn get_time_series_database_client(
     connect_timeout: Duration,
     request_timeout: Duration,
-) -> Result<(Client, String)> {
+) -> Result<(HistoryDbClient, String)> {
     // The configuration loader already reports failures as `anyhow::Error`;
     // propagating it preserves the original error chain (no string re-wrap).
     let config = HomeIotConfig::new()?;
@@ -60,8 +108,7 @@ pub(crate) async fn get_time_series_database_client(
     // (`Connection` -> services -> repository) instead of a hardcoded
     // constant: deployments rename it in configuration, not in code.
     //
-    // The client is built through `ClientBuilder::with_builder` so the
-    // underlying reqwest client carries connect and request timeouts.
+    // The reqwest client carries connect and request timeouts directly.
     // Without them a hung or unreachable InfluxDB server would stall
     // `set_history` indefinitely (the HTTP call never returns) while the
     // corresponding SQLite update is already committed, piling up sensor
@@ -98,15 +145,15 @@ pub(crate) async fn get_time_series_database_client(
         // the expected transport; fail loudly instead of guessing.
         other => bail!("history_db_url must use the http or https scheme, got '{other}'"),
     }
-    let client = influxdb2::ClientBuilder::with_builder(
+    let client = HistoryDbClient::new(
         reqwest::ClientBuilder::new()
             .connect_timeout(connect_timeout)
-            .timeout(request_timeout),
-        url,
+            .timeout(request_timeout)
+            .build()?,
+        parsed,
         org,
         token,
-    )
-    .build()?;
+    );
     Ok((client, config.bucket_name()))
 }
 

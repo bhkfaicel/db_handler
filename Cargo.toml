@@ -30,15 +30,11 @@ log = "0.4.29"
 chrono = {version = "0.4.44", features = ["serde"]}
 tokio = { version = "1.50.0", features = ["rt","macros"] }
 futures = "0.3.32"
-# InfluxDB 2.x client (rustls for lighter, pure-Rust TLS)
-influxdb2 = { version = "0.5", features = ["rustls"], default-features = false }
-# Direct reqwest on the same 0.11.x line influxdb2 already resolves: the
-# history client factory must name `reqwest::ClientBuilder` to attach
-# connect/request timeouts. No features of its own (TLS comes from
-# influxdb2's rustls activation of the shared reqwest build).
-reqwest = { version = "0.11", default-features = false }
+# Reqwest provides the InfluxDB write transport directly. HTTP/2 is disabled
+# by leaving the optional feature off; InfluxDB writes only need HTTP/1.1.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 # URL parsing for the history DB transport policy (scheme + host check).
-# Already in the dependency graph via reqwest/influxdb2; naming it as a
+# Already in the dependency graph via reqwest; naming it as a
 # direct dependency costs no new code and avoids hand-rolled URL handling.
 url = "2"
 db_derive = { version = "1.0.0", registry = "forgejorc" }

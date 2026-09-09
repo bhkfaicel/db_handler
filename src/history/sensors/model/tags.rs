@@ -8,37 +8,9 @@ use serde::{Deserialize, Serialize};
 /// In time-series databases, tags should contain values that are frequently queried
 /// but don't change frequently.
 ///
-/// Line-protocol rendering happens exclusively through InfluxDB's
-/// `DataPoint::builder`, which performs the required escaping of the tag
-/// values (`\`, `,`, `=`, space); no manual formatter is kept here.
+/// Line-protocol rendering happens in the history repository, which performs
+/// the required escaping of tag values (`\`, `,`, `=`, space).
 ///
-/// # Example
-///
-/// Build the point exactly like the write path does. The example is
-/// `ignore` rather than a compiled doctest: `SensorTags` lives in a
-/// crate-private module, so no import path for it can link from an
-/// external doctest crate.
-///
-/// ```ignore
-/// use db_handler::history::sensors::model::SensorTags;
-/// use db_handler::sensors::model::ProductType;
-/// use influxdb2::models::DataPoint;
-///
-/// let tags = SensorTags::new(
-///     ProductType::ContactSensor,
-///     123,
-///     "AA:BB:CC:DD:EE:01".to_string(),
-/// )
-/// .expect("the MAC is well formed");
-///
-/// let point = DataPoint::builder("sensor_data")
-///     .tag("product_type", ProductType::ContactSensor.to_string())
-///     .tag("sensor_id", tags.sensor_id.to_string())
-///     .tag("sensor_mac", tags.sensor_mac.as_str())
-///     .build()
-///     .expect("a valid data point");
-/// let _ = point;
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SensorTags {
     /// Type of product/sensor (e.g., ContactSensor)

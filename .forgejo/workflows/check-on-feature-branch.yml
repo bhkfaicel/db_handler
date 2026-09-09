@@ -20,5 +20,6 @@ jobs:
     with:
       enable_deny: true
       test_command: bash scripts/test.sh
+      audit_ignore_advisories: RUSTSEC-2023-0071
     secrets:
       RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}

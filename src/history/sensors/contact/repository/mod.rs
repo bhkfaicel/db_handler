@@ -1,16 +1,15 @@
 use chrono::{DateTime, Utc};
-use futures::stream;
-use influxdb2::models::{DataPoint, FieldValue};
+use std::fmt::Write;
+use std::sync::Arc;
 
+use crate::db::history::connection::HistoryDbClient;
 use crate::history::sensors::{
     error::{Result, SensorHistoryError},
     model::{fields::VibrationCount, point::SensorDataPoint, SensorFields, SensorTags},
 };
 use crate::sensors::model::ProductType;
-use std::sync::Arc;
-
 pub(crate) struct Repository {
-    client: Arc<influxdb2::Client>,
+    client: Arc<HistoryDbClient>,
     bucket: String,
 }
 
@@ -19,7 +18,7 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `client` - InfluxDB client
+    /// * `client` - History database client
     /// * `bucket` - Name of the InfluxDB bucket history writes target,
     ///   taken from the configuration file
     ///
@@ -27,7 +26,7 @@ impl Repository {
     ///
     /// A new instance of the repository initialized with the provided
     /// client and bucket name.
-    pub(crate) fn new(client: Arc<influxdb2::Client>, bucket: String) -> Self {
+    pub(crate) fn new(client: Arc<HistoryDbClient>, bucket: String) -> Self {
         Self { client, bucket }
     }
 
@@ -58,13 +57,9 @@ impl Repository {
             is_open
         );
         let point = SensorDataPoint::new("sensor_data".to_string(), tags, fields);
-        let datapoint = convert_to_influx_datapoint(&point)?;
-        log::debug!("DataPoint created successfully, writing to InfluxDB...");
-        match self
-            .client
-            .write(&bucket, stream::iter(vec![datapoint]))
-            .await
-        {
+        let line_protocol = render_line_protocol(&point)?;
+        log::debug!("Line protocol created successfully, writing to InfluxDB...");
+        match self.client.write(&bucket, &line_protocol).await {
             Ok(_) => {
                 // Hot path: this line runs on every successful sensor event,
                 // so success details stay at debug level (info would pay a
@@ -90,31 +85,32 @@ impl Repository {
     }
 }
 
-/// Converts a SensorDataPoint to an InfluxDB DataPoint.
-fn convert_to_influx_datapoint(point: &SensorDataPoint) -> Result<DataPoint> {
-    let mut builder = DataPoint::builder(point.measurement.clone());
+/// Converts a sensor point to InfluxDB line protocol.
+fn render_line_protocol(point: &SensorDataPoint) -> Result<String> {
+    let mut line = format!(
+        "{},product_type={},sensor_id={},sensor_mac={} ",
+        escape_key(&point.measurement),
+        escape_key(&point.tags.product_type.to_string()),
+        point.tags.sensor_id,
+        escape_key(&point.tags.sensor_mac)
+    );
+    let mut fields = Vec::new();
 
-    // Add tags
-    builder = builder.tag("product_type", point.tags.product_type.to_string());
-    builder = builder.tag("sensor_id", point.tags.sensor_id.to_string());
-    builder = builder.tag("sensor_mac", point.tags.sensor_mac.clone());
-
-    // Add fields based on type
+    // Add fields based on the sensor type.
     match &point.fields {
         SensorFields::Contact {
             is_open,
             vibration_count,
             sensor_timestamp,
         } => {
-            builder = builder.field("is_open", FieldValue::from(*is_open));
+            fields.push(format!("is_open={is_open}"));
             if let Some(vc) = vibration_count {
-                builder = builder.field("vibration_count", FieldValue::from(vc.count as i64));
-                builder = builder.field(
-                    "vibration_time_window",
-                    FieldValue::from(vc.time_window as i64),
-                );
-                builder =
-                    builder.field("vibration_time_unit", FieldValue::from(vc.unit.to_string()));
+                fields.push(format!("vibration_count={}i", vc.count));
+                fields.push(format!("vibration_time_window={}i", vc.time_window));
+                fields.push(format!(
+                    "vibration_time_unit=\"{}\"",
+                    escape_string(&vc.unit.to_string())
+                ));
             }
             if let Some(timestamp) = sensor_timestamp {
                 // An out-of-range timestamp must fail loudly: silently
@@ -125,10 +121,11 @@ fn convert_to_influx_datapoint(point: &SensorDataPoint) -> Result<DataPoint> {
                         timestamp
                     ))
                 })?;
-                builder = builder.field("sensor_timestamp", FieldValue::from(timestamp_ns));
+                fields.push(format!("sensor_timestamp={timestamp_ns}i"));
             }
         }
     }
+    line.push_str(&fields.join(","));
 
     // Add timestamp (convert DateTime<Utc> to nanoseconds since epoch); an
     // out-of-range value is a data error reported as `InvalidFormat`, never
@@ -139,11 +136,41 @@ fn convert_to_influx_datapoint(point: &SensorDataPoint) -> Result<DataPoint> {
             point.timestamp
         ))
     })?;
-    builder = builder.timestamp(timestamp_ns);
+    write!(line, " {timestamp_ns}").expect("writing to a String cannot fail");
+    Ok(line)
+}
 
-    builder.build().map_err(|e| {
-        SensorHistoryError::invalid_format(format!("Failed to build DataPoint: {}", e))
+/// Escapes measurement and tag keys according to InfluxDB line protocol.
+fn escape_key(value: &str) -> String {
+    escape_chars(value, |character| match character {
+        '\\' => Some("\\\\"),
+        ',' => Some("\\,"),
+        ' ' => Some("\\ "),
+        '=' => Some("\\="),
+        _ => None,
     })
+}
+
+/// Escapes a string field according to InfluxDB line protocol.
+fn escape_string(value: &str) -> String {
+    escape_chars(value, |character| match character {
+        '\\' => Some("\\\\"),
+        '"' => Some("\\\""),
+        _ => None,
+    })
+}
+
+/// Escapes selected characters without allocating intermediate strings.
+fn escape_chars(value: &str, replacement: impl Fn(char) -> Option<&'static str>) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if let Some(replacement) = replacement(character) {
+            escaped.push_str(replacement);
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]

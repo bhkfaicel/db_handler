@@ -8,9 +8,92 @@
 
 mod policy;
 
-use crate::db::history::connection::get_time_series_database_client;
+use crate::db::history::connection::{get_time_series_database_client, HistoryDbClient};
 use anyhow::Result;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::time::{Duration, Instant};
+
+/// Verifies the complete InfluxDB write request without contacting a real server.
+#[tokio::test]
+async fn write_sends_expected_influx_request() -> Result<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server = std::thread::spawn(move || -> Result<(String, String, String)> {
+        let (socket, _) = listener.accept()?;
+        let mut reader = BufReader::new(socket.try_clone()?);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line)?;
+        let mut headers = String::new();
+        let mut content_length = 0;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header)?;
+            if header == "\r\n" {
+                break;
+            }
+            headers.push_str(&header);
+            if let Some((name, value)) = header.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse::<usize>()?;
+                }
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body)?;
+        let mut socket = reader.into_inner();
+        socket.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")?;
+        Ok((request_line, headers, String::from_utf8(body)?))
+    });
+
+    let client = HistoryDbClient::new(
+        reqwest::Client::builder().http1_only().build()?,
+        url::Url::parse(&format!("http://{addr}"))?,
+        "home org".to_string(),
+        "secret-token".to_string(),
+    );
+    client
+        .write(
+            "sensor bucket",
+            "sensor_data,product_type=ContactSensor,is_open=true 123",
+        )
+        .await?;
+
+    let (request_line, headers, body) = server.join().expect("the request server must finish")?;
+    assert!(request_line
+        .starts_with("POST /api/v2/write?org=home+org&bucket=sensor+bucket&precision=ns HTTP/1.1"));
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer secret-token\r\n"));
+    assert_eq!(
+        body,
+        "sensor_data,product_type=ContactSensor,is_open=true 123"
+    );
+    Ok(())
+}
+
+/// Verifies that non-successful InfluxDB responses become write errors.
+#[tokio::test]
+async fn write_rejects_http_error_status() -> Result<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server = std::thread::spawn(move || -> Result<()> {
+        let (mut socket, _) = listener.accept()?;
+        socket.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
+        Ok(())
+    });
+
+    let client = HistoryDbClient::new(
+        reqwest::Client::builder().http1_only().build()?,
+        url::Url::parse(&format!("http://{addr}"))?,
+        "org".to_string(),
+        "token".to_string(),
+    );
+    let result = client.write("bucket", "sensor_data value=1i 1").await;
+
+    assert!(result.is_err(), "HTTP 500 must fail the history write");
+    server.join().expect("the error server must finish")?;
+    Ok(())
+}
 
 /// Points the factory at an in-process server that accepts and never
 /// writes, issues one minimal write with short timeouts (1 s connect /
@@ -60,17 +143,10 @@ async fn hung_influx_server_write_fails_through_request_timeout() -> Result<()> 
     let (client, bucket) =
         get_time_series_database_client(Duration::from_secs(1), Duration::from_secs(2)).await?;
 
-    // Minimal hand-built data point: content is irrelevant, the request is
-    // cut off by the timeout before any server-side processing.
-    let point = influxdb2::models::DataPoint::builder("timeout_probe")
-        .field("value", influxdb2::models::FieldValue::from(1_i64))
-        .build()
-        .expect("static data point must build");
-
     let started = Instant::now();
-    let write = client
-        .write(&bucket, futures::stream::iter(vec![point]))
-        .await;
+    // Minimal line protocol: content is irrelevant, the request is cut off
+    // by the timeout before any server-side processing.
+    let write = client.write(&bucket, "timeout_probe value=1i 1").await;
     let elapsed = started.elapsed();
 
     assert!(

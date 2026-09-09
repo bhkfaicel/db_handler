@@ -3,14 +3,14 @@
 //!
 //! These are pure unit tests: the constructor only stores the shared
 //! client and the configured bucket name, and the conversion function
-//! builds an InfluxDB `DataPoint` in memory; neither ever touches the
+//! builds InfluxDB line protocol in memory; neither ever touches the
 //! network.
 
 use std::sync::Arc;
 
-use influxdb2::Client;
+use crate::db::history::connection::HistoryDbClient;
 
-use super::{convert_to_influx_datapoint, Repository};
+use super::{render_line_protocol, Repository};
 use crate::history::sensors::error::SensorHistoryError;
 use crate::history::sensors::model::fields::SensorFields;
 use crate::history::sensors::model::point::SensorDataPoint;
@@ -60,7 +60,7 @@ fn invalid_point_timestamp_yields_invalid_format() {
     // ~1e10 seconds after the epoch exceeds the i64 nanosecond range, so
     // `timestamp_nanos_opt()` returns `None` for it.
     let out_of_range = DateTime::from_timestamp(10_000_000_000, 0).unwrap();
-    let error = convert_to_influx_datapoint(&contact_point(out_of_range)).unwrap_err();
+    let error = render_line_protocol(&contact_point(out_of_range)).unwrap_err();
     assert_invalid_format(error);
 }
 
@@ -74,7 +74,7 @@ fn invalid_sensor_timestamp_yields_invalid_format() {
         vibration_count: None,
         sensor_timestamp: Some(DateTime::from_timestamp(10_000_000_000, 0).unwrap()),
     };
-    let error = convert_to_influx_datapoint(&point).unwrap_err();
+    let error = render_line_protocol(&point).unwrap_err();
     assert_invalid_format(error);
 }
 
@@ -84,10 +84,11 @@ fn invalid_sensor_timestamp_yields_invalid_format() {
 #[test]
 fn new_returns_repository_initialized_with_client_and_bucket() {
     // Build a client against a local URL: no connection is attempted.
-    let client = Arc::new(Client::new(
-        "http://localhost:8086".to_string(),
-        "org",
-        "token",
+    let client = Arc::new(HistoryDbClient::new(
+        reqwest::Client::new(),
+        url::Url::parse("http://localhost:8086").expect("static URL must parse"),
+        "org".to_string(),
+        "token".to_string(),
     ));
     let bucket = "configured-sensor-bucket".to_string();
     let repository = Repository::new(Arc::clone(&client), bucket.clone());

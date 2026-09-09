@@ -2,15 +2,14 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::db::history::connection::get_time_series_database_client;
+use crate::db::history::connection::{get_time_series_database_client, HistoryDbClient};
 use crate::db::primary::connection::get_primary_db_client;
-use influxdb2::Client;
 use sqlx::sqlite::SqlitePool;
 
 #[derive(Clone)]
 pub struct Connection {
     primary_db_client: Arc<SqlitePool>,
-    history_db_client: Arc<Client>,
+    history_db_client: Arc<HistoryDbClient>,
     history_db_bucket: String,
 }
 
@@ -38,7 +37,7 @@ impl Connection {
         self.primary_db_client.clone()
     }
 
-    pub fn history_db_client(&self) -> Arc<Client> {
+    pub fn history_db_client(&self) -> Arc<HistoryDbClient> {
         self.history_db_client.clone()
     }
 

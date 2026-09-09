@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 
+use crate::db::history::connection::HistoryDbClient;
 use crate::history::sensors::{
     contact::repository::Repository, error::Result, model::VibrationCount,
 };
@@ -10,11 +11,11 @@ pub struct ContactSensorHistoryService {
 }
 
 impl ContactSensorHistoryService {
-    /// Creates a new instance of the service with an InfluxDB client.
+    /// Creates a new instance of the service with a history database client.
     ///
     /// # Arguments
     ///
-    /// * `client` - InfluxDB client
+    /// * `client` - History database client
     /// * `bucket` - Name of the InfluxDB bucket history writes target,
     ///   taken from the configuration file
     ///
@@ -22,7 +23,7 @@ impl ContactSensorHistoryService {
     ///
     /// A new instance of the service initialized with the provided client
     /// and bucket name.
-    pub fn new(client: Arc<influxdb2::Client>, bucket: String) -> Self {
+    pub fn new(client: Arc<HistoryDbClient>, bucket: String) -> Self {
         let repository = Arc::new(Repository::new(client, bucket));
         Self { repository }
     }
