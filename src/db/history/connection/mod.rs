@@ -19,7 +19,12 @@ pub struct HistoryDbClient {
 
 impl HistoryDbClient {
     /// Creates a client with an already validated base URL and HTTP transport.
-    pub fn new(client: Client, base_url: Url, org: String, token: String) -> Self {
+    ///
+    /// Crate-private on purpose: external callers must obtain a client
+    /// through `get_time_series_database_client`, which enforces the
+    /// HTTPS/loopback transport policy before any bearer token can be
+    /// attached to a request.
+    pub(crate) fn new(client: Client, base_url: Url, org: String, token: String) -> Self {
         Self {
             client,
             base_url,
