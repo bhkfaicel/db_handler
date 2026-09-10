@@ -87,10 +87,13 @@ and this project adheres to semantic versioning.
   migration includes request-level and exact serializer compatibility tests.
   The serializer writes directly into one bounded buffer and transfers the
   completed body into the shared HTTP client without an extra body copy.
-  lockfile-only `rsa` advisory remains deferred because `sqlx-mysql` is not
+  The lockfile-only `rsa` advisory remains deferred because `sqlx-mysql` is not
   active and no fixed `rsa` release exists; the branch workflow ignores only
   this advisory through its explicit `cargo audit` input, now forwarded by
   feature, development, main, and publication workflows.
+- The history client constructor is now crate-private, so external callers
+  can only obtain a client through the factory that enforces the
+  HTTPS/loopback transport policy.
 - Removed the unused direct `futures` dependency identified after the
   transport migration.
 - SQLx now disables unused default database drivers and resolves only the
