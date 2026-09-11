@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to semantic versioning.
 
-## [Unreleased]
+## [0.4.0]
 
 ### Added
 
@@ -32,10 +32,10 @@ and this project adheres to semantic versioning.
   oversized values (over 4096 bytes) as well as a validity window where
   `expire_at` is not strictly after `created_at` are rejected before any
   SQL runs. Duplicate session storage surfaces as the existing
-   `RefreshTokenError::AlreadyExists` without overwriting or extending
-   the prior row; raw token values never reach SQL storage, returned
-   data, errors, logs, Debug output or serialization. Existing REST
-   refresh rotation behavior is unchanged.
+  `RefreshTokenError::AlreadyExists` without overwriting or extending
+  the prior row; raw token values never reach SQL storage, returned
+  data, errors, logs, Debug output or serialization. Existing REST
+  refresh rotation behavior is unchanged.
 - Public atomic password reset and exact email lookup on `UserService`
   (additive, behind the `users` feature): `get_by_email(email)` resolves an
   account with ONE bound, byte-exact SQL equality query (`WHERE email = ?`)
