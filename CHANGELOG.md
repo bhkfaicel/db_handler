@@ -7,6 +7,140 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+## [0.4.1] 2026-09-12
+
+### Fixed
+
+- The `scripts/test.sh` CI gate no longer requires system SQLite development
+  headers: SQLx's `sqlite` feature compiles its bundled SQLite and needs only
+  a C compiler, so the preflight now checks for `cc` instead of failing in
+  containers without `libsqlite3-dev`.
+
+## [0.4.0] 2026-09-12
+
+### Added
+
+- Public gRPC session validation and revocation on `RefreshTokenService`
+  (additive, behind the `users` feature): `add_session` stores a session
+  for a `(user_id, raw_token, expire_at, created_at)` tuple,
+  `validate_session` non-consumingly returns the owning user ID
+  (`Ok(None)` for unknown, expired or revoked sessions — fail closed),
+  `revoke_session` revokes the presented session in one atomic SQL
+  statement (idempotent: unknown, already-revoked or expired values stay
+  a no-op success), `revoke_all_sessions` revokes every session of one
+  user, and `cleanup_expired_sessions` sweeps expired session rows.
+  gRPC sessions and REST refresh tokens are now cryptographically
+  domain-separated at the storage boundary: sessions are stored under
+  the tagged digest `grpc-session:<sha256(raw)>` while refresh tokens
+  keep their bare 64-hex digests, every refresh SQL path matches only
+  refresh-domain rows and every session path only session-domain rows,
+  so the same raw value can exist in both domains as two distinct rows
+  and no refresh rotation, purge or deletion path can consume or revoke
+  a gRPC session (nor the reverse). No SQL migration was needed: the
+  tagged value fits the existing `TEXT NOT NULL UNIQUE` column. Session
+  generation remains a documented caller contract: presented values MUST
+  carry at least 256 bits of OS-CSPRNG unpredictability, and empty or
+  oversized values (over 4096 bytes) as well as a validity window where
+  `expire_at` is not strictly after `created_at` are rejected before any
+  SQL runs. Duplicate session storage surfaces as the existing
+  `RefreshTokenError::AlreadyExists` without overwriting or extending
+  the prior row; raw token values never reach SQL storage, returned
+  data, errors, logs, Debug output or serialization. Existing REST
+  refresh rotation behavior is unchanged.
+- Public atomic password reset and exact email lookup on `UserService`
+  (additive, behind the `users` feature): `get_by_email(email)` resolves an
+  account with ONE bound, byte-exact SQL equality query (`WHERE email = ?`)
+  — no trimming, lowercasing or case folding, no pagination, no in-memory
+  scan — and returns the public user model, which never contains password
+  hash material (`Ok(None)` for an unknown exact email).
+  `reset_password_revoking_tokens(email, new_password)` validates the new
+  password against the 8–128-byte policy and hashes it with Argon2id BEFORE
+  the database transaction opens (no SQLite write lock is held during the
+  memory-hard hashing), then ONE transaction performs the exact-email
+  lookup, the password update and the deletion of every `refresh_tokens`
+  row of the user. That deletion is deliberately unscoped by token domain:
+  a password reset is a user-lifecycle event that must invalidate BOTH the
+  REST refresh tokens and the gRPC sessions of the account, unlike the
+  domain-scoped sweeps. Any failure — lookup, update, deletion or commit —
+  rolls the whole transaction back, leaving the old password authenticating
+  and every credential row intact. Out-of-range passwords are rejected with
+  the typed `UserError::InvalidInput` before any SQL; an unknown email
+  returns the newly (re)introduced typed `UserError::NotFoundByEmail` and
+  writes nothing — a typed answer that is safe on this provisioning surface,
+  unlike the login path, which must keep account existence
+  indistinguishable. Provisioning consumers (notably `backend_grpc`) should
+  use this single operation instead of composing a password update with a
+  separate revocation call, which leaves stolen sessions alive when
+  revocation fails after the password change.
+- **Coordinated rollout (publication ordering, not a claim of current
+  compatibility):** publish 0.4.0 first; then `backend/`
+  (`rest_api_server`) bumps to it, adapts its email login and verifies
+  REST refresh rotation in its own mini-cycle; then `backend_grpc`
+  enables `users`, resumes its gated authentication work and consumes
+  the new exact lookup and atomic reset operation (instead of composing
+  update plus revocation or filtering paginated listings in memory).
+  Neither consumer is already compatible with 0.4.0 — each becomes
+  compatible only through its own mini-cycle, and deployment waits for
+  both.
+
+### Removed
+
+- The `bcrypt` dependency is fully removed from the crate manifest and its
+  dependency graph, along with the transitive `blowfish` and `base64` entries
+  nothing else retained.
+
+### Fixed
+
+- The `scripts/test.sh` CI gate no longer requires system SQLite development
+  headers: SQLx's `sqlite` feature compiles its bundled SQLite and needs only
+  a C compiler, so the preflight now checks for `cc` instead of failing in
+  containers without `libsqlite3-dev`.
+
+### Changed
+
+- History writes now use a direct `reqwest 0.13` HTTP/1.1 Rustls transport
+  instead of the unmaintained `influxdb2` client stack. InfluxDB v2 write
+  requests retain the configured URL, organization, bucket, bearer token,
+  nanosecond timestamps, timeout policy, and line-protocol behavior. The
+  migration includes request-level and exact serializer compatibility tests.
+  The serializer writes directly into one bounded buffer and transfers the
+  completed body into the shared HTTP client without an extra body copy.
+  The lockfile-only `rsa` advisory remains deferred because `sqlx-mysql` is not
+  active and no fixed `rsa` release exists; the branch workflow ignores only
+  this advisory through its explicit `cargo audit` input, now forwarded by
+  feature, development, main, and publication workflows.
+- The history client constructor is now crate-private, so external callers
+  can only obtain a client through the factory that enforces the
+  HTTPS/loopback transport policy.
+- Removed the unused direct `futures` dependency identified after the
+  transport migration.
+- SQLx now disables unused default database drivers and resolves only the
+  SQLite feature set required by this crate, reducing the active dependency
+  graph without changing the public database API.
+- **Breaking:** user passwords are now hashed with Argon2id (RustCrypto,
+  default parameters `v=19, m=19456, t=2, p=1`) and stored as standard PHC
+  strings with a unique OS-CSPRNG salt per hash, replacing bcrypt.
+- **Operational warning (zero legacy):** existing bcrypt password hashes are
+  intentionally unsupported in 0.4.0 and there is NO verification fallback:
+  a legacy stored hash fails closed (no user returned, no panic). EVERY
+  existing account MUST have its password reset through an approved
+  provisioning/reset path BEFORE any consumer rolls out 0.4.0; logging in
+  with a pre-migration password can never succeed.
+- Password policy for the whole users domain: clear passwords must be
+  8–128 bytes. Creation and password resets outside that range are rejected
+  with the typed `UserError::InvalidInput` error; login attempts with
+  out-of-range passwords uniformly return no user (before any hashing work),
+  independently of whether the email exists.
+- Login keeps the anti-enumeration dummy-verification design: unknown
+  emails verify against a fixed, valid Argon2id dummy PHC with the same
+  policy, so wrong password and unknown email stay indistinguishable.
+  Malformed stored PHC strings fail closed (no user, no panic) without
+  exposing hash material, and that failure path now also burns one dummy
+  Argon2id verification, making it timing-indistinguishable from the
+  wrong-password and unknown-email responses during the password-reset
+  transition window. Email lookups remain byte-exact: no trimming,
+  lowercasing, or case folding.
+
 ## [0.3.2] - 2026-09-07
 
 ### Updated

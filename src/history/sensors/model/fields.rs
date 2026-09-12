@@ -39,34 +39,8 @@ pub struct VibrationCount {
 /// are not indexed and can change frequently. Different sensor types
 /// will have different field structures.
 ///
-/// Field rendering happens exclusively through InfluxDB's
-/// `DataPoint::builder` (the write path in this crate), which handles
-/// the line-protocol quoting and escaping of field values.
-///
-/// # Example
-///
-/// Add the measured values exactly like the write path does:
-///
-/// no_run
-///
-/// ```
-/// use db_handler::history::sensors::model::fields::SensorFields;
-/// use influxdb2::models::{DataPoint, FieldValue};
-///
-/// // For a contact sensor
-/// let fields = SensorFields::Contact {
-///     is_open: true,
-///     vibration_count: None,
-///     sensor_timestamp: None,
-/// };
-///
-/// let mut builder = DataPoint::builder("sensor_data");
-/// if let SensorFields::Contact { is_open, .. } = fields {
-///     builder = builder.field("is_open", FieldValue::from(is_open));
-/// }
-/// let point = builder.build().expect("a valid data point");
-/// let _ = point;
-/// ```
+/// Field rendering happens in the history repository, which handles the
+/// line-protocol quoting and escaping of field values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SensorFields {
     /// Fields for contact sensors (open/close detection)

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::users::model::{User, UserSortKey};
 
 use super::model::InternalUser;
-use super::password::{verify_password_async, DUMMY_BCRYPT_HASH};
+use super::password::{password_length_ok, verify_password_async, DUMMY_ARGON2_HASH};
 
 /// Repository for performing CRUD operations on `User` entities.
 ///
@@ -45,9 +45,9 @@ impl UserRepository {
         id: u32,
         username: Option<String>,
         email: Option<String>,
-        // Already bcrypt-hashed by the service: hashing is domain logic and
-        // lives above the data-access layer, which only persists what it is
-        // handed.
+        // Already Argon2id-hashed by the service: hashing is domain logic
+        // and lives above the data-access layer, which only persists what
+        // it is handed.
         password_hash: Option<String>,
     ) -> Result<u32> {
         let mut query_builder = QueryBuilder::<Sqlite>::new("UPDATE users SET ");
@@ -114,11 +114,117 @@ impl UserRepository {
         }
     }
 
+    /// Exact-email lookup (byte-exact, parameterized).
+    ///
+    /// One bound equality query (`WHERE email = ?`) with the same SQLite
+    /// byte-exact semantics as the login path: no trimming, no lowercasing,
+    /// no case folding, no pagination, no in-memory scan. Returns the
+    /// public model, which structurally carries no password hash.
+    ///
+    /// Uses the runtime query API (like the tests' raw-row helpers): the
+    /// compile-time macro would need a freshly generated `.sqlx` artifact,
+    /// while the runtime API is offline-mode independent; every statement
+    /// added here is exercised by the adjacent tests.
+    pub(crate) async fn get_by_email(&self, email: String) -> Result<Option<User>> {
+        sqlx::query_as::<_, User>("SELECT id, username, email FROM users WHERE email = ?")
+            .bind(email)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(map_sqlx_to_common_error)
+    }
+
+    /// Atomic password reset invalidating every bearer credential of the
+    /// user across BOTH token domains.
+    ///
+    /// ONE transaction, in order:
+    /// 1. exact byte-comparable email lookup inside the transaction —
+    ///    an unknown email writes nothing and reports `Ok(None)`;
+    /// 2. `UPDATE users SET password_hash = ? WHERE id = ?` to the
+    ///    freshly generated Argon2id PHC the service hands in;
+    /// 3. `DELETE FROM refresh_tokens WHERE user_id = ?` — deliberately
+    ///    UNSCOPED by domain (no `grpc-session:` predicate): a password
+    ///    reset must kill both the REST refresh rows AND the gRPC session
+    ///    rows of the user, unlike every other per-user sweep in this
+    ///    crate which is domain-scoped on purpose;
+    /// 4. COMMIT.
+    ///
+    /// Any lookup/update/deletion/commit error aborts the whole
+    /// transaction (sqlx rolls the open transaction back on drop), leaving
+    /// the old password and every refresh/session row intact. The
+    /// memory-hard Argon2 derivation has already happened in the service,
+    /// BEFORE this transaction opens, so no SQLite write lock is held
+    /// during hashing.
+    ///
+    /// Returns the updated public user model (structurally hash-free), or
+    /// `Ok(None)` when the exact email matches no user.
+    ///
+    /// Runtime query API for the same offline-artifact independence reason
+    /// as `get_by_email` above; every statement is exercised by the
+    /// adjacent tests.
+    pub(crate) async fn reset_password_revoking_tokens(
+        &self,
+        email: &str,
+        // Already Argon2id-hashed by the service: hashing is domain logic
+        // and must stay outside the open transaction (no write lock is
+        // held during memory-hard hashing). The repository only persists
+        // the hash it is handed.
+        password_hash: String,
+    ) -> Result<Option<User>> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_to_common_error)?;
+
+        // 1. Exact-email lookup inside the transaction (byte-comparable,
+        //    bound parameter — same semantics as the login lookup).
+        let record =
+            sqlx::query_as::<_, User>("SELECT id, username, email FROM users WHERE email = ?")
+                .bind(email)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_to_common_error)?;
+
+        let Some(record) = record else {
+            // Unknown email: nothing has been written; returning here
+            // drops the open transaction and rolls it back.
+            return Ok(None);
+        };
+
+        // 2. Password update inside the same transaction.
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(password_hash)
+            .bind(record.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+
+        // 3. Cross-domain credential invalidation inside the same
+        //    transaction: NO domain predicate here on purpose — both the
+        //    refresh-domain and session-domain rows of this user are
+        //    deleted, matching refresh replay-invalidation semantics.
+        sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?")
+            .bind(record.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_to_common_error)?;
+
+        // 4. Commit: only now are the password change and the token
+        //    purge visible together.
+        tx.commit().await.map_err(map_sqlx_to_common_error)?;
+
+        Ok(Some(record))
+    }
+
     pub(crate) async fn get_by_email_and_password(
         &self,
         email: String,
         password: String,
     ) -> Result<Option<User>> {
+        // Uniform length gate: an out-of-range password is rejected as
+        // `None` BEFORE any SQL or Argon2 work, independently of whether
+        // the byte-exact email exists, so an invalid length can never
+        // reveal account existence.
+        if !password_length_ok(&password) {
+            return Ok(None);
+        }
+
         let result = sqlx::query!(
             "SELECT id, username, email,password_hash FROM users WHERE email = ?",
             email
@@ -127,18 +233,37 @@ impl UserRepository {
         .await
         .map_err(map_sqlx_to_common_error)?;
 
-        // Single always-verify path: bcrypt runs exactly once whether or
+        // Single always-verify path: Argon2 runs exactly once whether or
         // not the email exists. An unknown email verifies against a fixed
-        // dummy hash (same DEFAULT_COST policy, see `DUMMY_BCRYPT_HASH`),
-        // so both branches burn identical CPU and response time can no
-        // longer reveal whether an email is registered (timing
-        // user-enumeration oracle, CWE-208).
+        // dummy PHC (same default policy, see `DUMMY_ARGON2_HASH`), so both
+        // branches burn identical CPU and response time can no longer
+        // reveal whether an email is registered (timing user-enumeration
+        // oracle, CWE-208). The presented password is cloned first
+        // (bounded to 8-128 bytes by the gate above) so a failed
+        // verification can still burn the equalizing dummy derivation
+        // below.
         let stored_hash = result.as_ref().map(|record| record.password_hash.clone());
         let verified = verify_password_async(
-            password,
-            stored_hash.unwrap_or_else(|| DUMMY_BCRYPT_HASH.to_owned()),
+            password.clone(),
+            stored_hash.unwrap_or_else(|| DUMMY_ARGON2_HASH.to_owned()),
         )
         .await;
+        // Equalize the verification-ERROR path too (CWE-208): a stored
+        // hash that fails PHC parsing — the shape of every pre-migration
+        // or corrupted row — errors out before any Argon2 work, so its
+        // response would be measurably faster than the wrong-password and
+        // unknown-email responses and reveal that the email exists with
+        // an unusable hash. Burn exactly one dummy verification (result
+        // discarded) before reporting the failure uniformly: malformed
+        // rows, unknown emails and wrong passwords all cost one
+        // derivation.
+        let verified = match verified {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let _ = verify_password_async(password, DUMMY_ARGON2_HASH.to_owned()).await;
+                Err(error)
+            }
+        };
 
         match (result, verified) {
             (Some(record), Ok(true)) => {
@@ -152,7 +277,8 @@ impl UserRepository {
                 }))
             }
             // Any other combination — unknown email, wrong password, or a
-            // verification error — reports no user, as before.
+            // malformed/failed verification — reports no user: fail closed
+            // without panic and without exposing hash details.
             _ => Ok(None),
         }
     }

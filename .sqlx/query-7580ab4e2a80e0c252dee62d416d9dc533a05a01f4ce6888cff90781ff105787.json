@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM refresh_tokens WHERE user_id = ? AND token NOT LIKE 'grpc-session:%'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7580ab4e2a80e0c252dee62d416d9dc533a05a01f4ce6888cff90781ff105787"
+}

@@ -9,7 +9,9 @@ use crate::{
     users::{
         error::{Result, UserError},
         model::{PaginationParams, User},
-        password::hash_password_async,
+        password::{
+            hash_password_async, password_length_ok, MAX_PASSWORD_BYTES, MIN_PASSWORD_BYTES,
+        },
         repository::UserRepository,
     },
 };
@@ -39,15 +41,23 @@ fn map_common_error(e: CommonError, email: Option<&str>) -> UserError {
     }
 }
 
-/// Maps a password-hashing failure to the domain error: a real bcrypt
-/// failure keeps the dedicated `PasswordHashing` variant, anything else is
-/// reported as a generic operation error.
+/// Maps a password-hashing failure to the domain error.
 fn map_hash_error(e: anyhow::Error) -> UserError {
-    if let Some(be) = e.downcast_ref::<bcrypt::BcryptError>() {
-        UserError::PasswordHashing(be.to_string())
-    } else {
-        UserError::operation(e.to_string())
+    // Argon2/PHC failure details never include the hash or the password;
+    // surface only the failure message.
+    UserError::PasswordHashing(e.to_string())
+}
+
+/// Rejects a clear password outside the house policy bounds (8..=128
+/// bytes) with the typed input error, before any hashing work.
+fn validate_password(password: &str) -> Result<()> {
+    if !password_length_ok(password) {
+        return Err(UserError::invalid_input(format!(
+            "password length must be between {} and {} bytes",
+            MIN_PASSWORD_BYTES, MAX_PASSWORD_BYTES
+        )));
     }
+    Ok(())
 }
 
 pub struct UserService {
@@ -89,9 +99,12 @@ impl UserService {
     /// # }
     /// ```
     pub async fn add(&self, username: String, email: String, password: String) -> Result<u32> {
-        // The hash runs on the blocking pool via the async helper: a cost-12
-        // bcrypt call is ~100-300 ms of CPU and must never stall the tokio
-        // worker inline.
+        // Enforce the house password policy before hashing: reject
+        // out-of-range secrets with the typed input error, no Argon2 work.
+        validate_password(&password)?;
+        // The hash runs on the blocking pool via the async helper: an
+        // Argon2id derivation is ~tens of ms of CPU/memory and must never
+        // stall the tokio worker inline.
         let password_hash = hash_password_async(password)
             .await
             .map_err(map_hash_error)?;
@@ -137,18 +150,32 @@ impl UserService {
         self.repository.get_by_id(id).await.map_err(UserError::from)
     }
 
-    /// Retrieves a user by its Email and clear password.
+    /// Retrieves a user by email and clear password (email login).
+    ///
+    /// The email lookup is byte-exact: the stored `email` is matched as-is
+    /// (no trimming, lowercasing or case folding) and remains the sole
+    /// login identifier. The presented password must be 8–128 bytes:
+    /// out-of-range values return `None` before any hashing work,
+    /// independently of whether the email exists. Verification runs one
+    /// Argon2id derivation (an unknown email burns the same work against a
+    /// fixed dummy PHC of the same policy, so response timing cannot reveal
+    /// account existence) and every failing combination returns `None`.
+    /// Stored hashes are standard PHC strings; legacy bcrypt rows are
+    /// intentionally unsupported in 0.4.0 (fail closed, no fallback), so
+    /// every pre-existing account must reset its password before it can
+    /// log in.
     ///
     /// # Arguments
     ///
-    /// * `email` - The email of the user to retrieve.
-    /// * `password` - The non hashed password of the user to retrieve.
+    /// * `email` - The exact email of the user to authenticate.
+    /// * `password` - The clear password of the user to authenticate.
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(user))` - If a user with the specified ID exists.
-    /// * `Ok(None)` - If no user with the specified ID is found.
-    /// * `Err(anyhow::Error)` - If an error occurs during retrieval.
+    /// * `Ok(Some(user))` - If the credentials match a stored user.
+    /// * `Ok(None)` - If no user matches (unknown email, wrong or
+    ///   out-of-range password, unparsable stored hash).
+    /// * `Err(UserError)` - If a database error occurs.
     ///
     /// # Example
     ///
@@ -174,6 +201,50 @@ impl UserService {
     ) -> Result<Option<User>> {
         self.repository
             .get_by_email_and_password(email, password)
+            .await
+            .map_err(UserError::from)
+    }
+
+    /// Retrieves a user by its exact email (byte-exact lookup).
+    ///
+    /// The lookup is one parameterized SQL equality query
+    /// (`WHERE email = ?`): byte-exact by contract — the presented email
+    /// is never trimmed, lowercased or case-folded, and the stored email
+    /// is matched as-is. No pagination and no in-memory filtering are
+    /// involved. The returned model is the public `User` (id, username,
+    /// email) and structurally contains no password hash.
+    ///
+    /// # Arguments
+    ///
+    /// * `email` - The exact email of the user to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(user))` - If a user with the exact email exists.
+    /// * `Ok(None)` - If no user matches the exact email.
+    /// * `Err(UserError)` - If a database error occurs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::users::service::UserService;
+    /// use db_handler::db::connection::Connection;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = UserService::new(connection.clone());
+    /// service.add("username".to_string(), "faycelbhk@gmail.com".to_string(), "clear password".to_string()).await?;
+    /// if let Some(user) = service.get_by_email("faycelbhk@gmail.com".to_string()).await? {
+    ///     println!("User found: {:?}", user);
+    /// } else {
+    ///     println!("User not found.");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_by_email(&self, email: String) -> Result<Option<User>> {
+        self.repository
+            .get_by_email(email)
             .await
             .map_err(UserError::from)
     }
@@ -301,16 +372,22 @@ impl UserService {
         email: Option<String>,
         password: Option<String>,
     ) -> Result<u32> {
-        // Hashing is domain logic: the clear password is hashed here, in
-        // the service, and the repository only persists the hash it is
-        // handed.
+        // Hashing is domain logic: the clear password is validated and
+        // hashed here, in the service, and the repository only persists the
+        // hash it is handed.
         let password_hash = match password {
-            // Async helper again: bcrypt on the blocking pool, never inline.
-            Some(password) => Some(
-                hash_password_async(password)
-                    .await
-                    .map_err(map_hash_error)?,
-            ),
+            Some(password) => {
+                // Same policy as creation: reject out-of-range reset
+                // passwords with the typed input error before hashing.
+                validate_password(&password)?;
+                // Async helper again: Argon2 on the blocking pool, never
+                // inline.
+                Some(
+                    hash_password_async(password)
+                        .await
+                        .map_err(map_hash_error)?,
+                )
+            }
             None => None,
         };
         self.repository
@@ -319,6 +396,93 @@ impl UserService {
             // A unique violation here means the target email already
             // belongs to another user; report it with that email.
             .map_err(|e| map_common_error(e, email.as_deref()))
+    }
+
+    /// Resets a user's password atomically and revokes every bearer
+    /// credential the user holds across BOTH token domains.
+    ///
+    /// # Atomicity contract
+    ///
+    /// The new password is validated (8–128 bytes) and hashed with
+    /// Argon2id BEFORE the database transaction opens, so no SQLite write
+    /// lock is ever held during the memory-hard hashing work. Then ONE
+    /// transaction performs, in order: the exact byte-comparable email
+    /// lookup, the password update to the new Argon2id PHC, and the
+    /// deletion of every `refresh_tokens` row of the user. That deletion
+    /// is deliberately UNSCOPED by token domain — unlike every other
+    /// per-user sweep in the crate — because a password reset must
+    /// invalidate both the REST refresh tokens AND the gRPC sessions of
+    /// the account. The whole operation commits once: any lookup, update,
+    /// deletion or commit failure rolls everything back, leaving the old
+    /// password fully valid and every refresh/session row intact.
+    ///
+    /// # Errors
+    ///
+    /// * `UserError::InvalidInput` - the new password is outside the
+    ///   8–128-byte policy; no SQL runs and nothing changes.
+    /// * `UserError::NotFoundByEmail` - no user matches the exact email.
+    ///   Unlike the login path — which must never reveal account existence
+    ///   and therefore answers unknown emails with a uniform `None` after
+    ///   dummy Argon2 work — password reset is an administrative
+    ///   provisioning surface where the caller explicitly targets one
+    ///   account, so the typed not-found answer leaks nothing the caller
+    ///   does not already control. Nothing is written on this path.
+    /// * `UserError::PasswordHashing` - the Argon2id hashing failed.
+    /// * `UserError::Common(CommonError::Database(_))` - database failure;
+    ///   the transaction (password update AND token deletion) is rolled
+    ///   back as a whole.
+    ///
+    /// # Arguments
+    ///
+    /// * `email` - The exact email of the account to reset (byte-exact:
+    ///   no trimming, lowercasing or case folding).
+    /// * `new_password` - The new clear password (8–128 bytes).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(user)` - The updated public user model; it never contains
+    ///   password-hash material.
+    /// * `Err(UserError)` - As described above.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::users::service::UserService;
+    /// use db_handler::db::connection::Connection;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = UserService::new(connection.clone());
+    /// service.add("username".to_string(), "faycelbhk@gmail.com".to_string(), "old password".to_string()).await?;
+    /// // One atomic call: password change + revocation of every refresh
+    /// // token and session of the account, committed together.
+    /// let user = service.reset_password_revoking_tokens("faycelbhk@gmail.com".to_string(), "new password".to_string()).await?;
+    /// println!("Password reset for {}", user.email);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn reset_password_revoking_tokens(
+        &self,
+        email: String,
+        new_password: String,
+    ) -> Result<User> {
+        // Policy gate BEFORE any hashing or SQL: out-of-range reset
+        // passwords are rejected with the typed input error.
+        validate_password(&new_password)?;
+        // Argon2id derivation on the blocking pool, BEFORE the
+        // transaction opens: no SQLite write lock is held during the
+        // memory-hard hashing work.
+        let password_hash = hash_password_async(new_password)
+            .await
+            .map_err(map_hash_error)?;
+        let updated = self
+            .repository
+            .reset_password_revoking_tokens(&email, password_hash)
+            .await
+            .map_err(UserError::from)?;
+        // Typed unknown-email outcome (provisioning surface — see the
+        // rustdoc above): nothing was written for an unknown email.
+        updated.ok_or(UserError::NotFoundByEmail(email))
     }
 }
 

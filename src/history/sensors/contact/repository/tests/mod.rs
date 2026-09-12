@@ -3,16 +3,16 @@
 //!
 //! These are pure unit tests: the constructor only stores the shared
 //! client and the configured bucket name, and the conversion function
-//! builds an InfluxDB `DataPoint` in memory; neither ever touches the
+//! builds InfluxDB line protocol in memory; neither ever touches the
 //! network.
 
 use std::sync::Arc;
 
-use influxdb2::Client;
+use crate::db::history::connection::HistoryDbClient;
 
-use super::{convert_to_influx_datapoint, Repository};
+use super::{escape_key, escape_string, render_line_protocol, Repository};
 use crate::history::sensors::error::SensorHistoryError;
-use crate::history::sensors::model::fields::SensorFields;
+use crate::history::sensors::model::fields::{SensorFields, TimeUnit, VibrationCount};
 use crate::history::sensors::model::point::SensorDataPoint;
 use crate::history::sensors::model::tags::SensorTags;
 use crate::sensors::model::ProductType;
@@ -60,7 +60,7 @@ fn invalid_point_timestamp_yields_invalid_format() {
     // ~1e10 seconds after the epoch exceeds the i64 nanosecond range, so
     // `timestamp_nanos_opt()` returns `None` for it.
     let out_of_range = DateTime::from_timestamp(10_000_000_000, 0).unwrap();
-    let error = convert_to_influx_datapoint(&contact_point(out_of_range)).unwrap_err();
+    let error = render_line_protocol(&contact_point(out_of_range)).unwrap_err();
     assert_invalid_format(error);
 }
 
@@ -74,8 +74,52 @@ fn invalid_sensor_timestamp_yields_invalid_format() {
         vibration_count: None,
         sensor_timestamp: Some(DateTime::from_timestamp(10_000_000_000, 0).unwrap()),
     };
-    let error = convert_to_influx_datapoint(&point).unwrap_err();
+    let error = render_line_protocol(&point).unwrap_err();
     assert_invalid_format(error);
+}
+
+/// Asserts the exact line protocol for a minimal contact point.
+#[test]
+fn renders_minimal_contact_point() {
+    let timestamp = DateTime::from_timestamp(1, 2).expect("static timestamp must be valid");
+    let line = render_line_protocol(&contact_point(timestamp)).expect("point must render");
+
+    assert_eq!(
+        line,
+        "sensor_data,product_type=ContactSensor,sensor_id=1,sensor_mac=AA:BB:CC:DD:EE:FF is_open=true 1000000002"
+    );
+}
+
+/// Asserts the exact line protocol for every optional contact field.
+#[test]
+fn renders_optional_contact_fields_and_sensor_timestamp() {
+    let mut point = contact_point(DateTime::from_timestamp(1, 2).unwrap());
+    point.fields = SensorFields::Contact {
+        is_open: false,
+        vibration_count: Some(VibrationCount {
+            count: 2,
+            time_window: 3,
+            unit: TimeUnit::Seconds,
+        }),
+        sensor_timestamp: Some(DateTime::from_timestamp(4, 5).unwrap()),
+    };
+
+    let line = render_line_protocol(&point).expect("point must render");
+
+    assert_eq!(
+        line,
+        "sensor_data,product_type=ContactSensor,sensor_id=1,sensor_mac=AA:BB:CC:DD:EE:FF is_open=false,vibration_count=2i,vibration_time_window=3i,vibration_time_unit=\"seconds\",sensor_timestamp=4000000005i 1000000002"
+    );
+}
+
+/// Asserts escaping for measurement/tag keys and quoted string fields.
+#[test]
+fn escapes_line_protocol_keys_and_strings() {
+    assert_eq!(
+        escape_key(r"measurement, key=value"),
+        r"measurement\,\ key\=value"
+    );
+    assert_eq!(escape_string(r#"seconds\"value"#), r#"seconds\\\"value"#);
 }
 
 /// The constructor stores the provided shared client and the provided
@@ -84,10 +128,11 @@ fn invalid_sensor_timestamp_yields_invalid_format() {
 #[test]
 fn new_returns_repository_initialized_with_client_and_bucket() {
     // Build a client against a local URL: no connection is attempted.
-    let client = Arc::new(Client::new(
-        "http://localhost:8086".to_string(),
-        "org",
-        "token",
+    let client = Arc::new(HistoryDbClient::new(
+        reqwest::Client::new(),
+        url::Url::parse("http://localhost:8086").expect("static URL must parse"),
+        "org".to_string(),
+        "token".to_string(),
     ));
     let bucket = "configured-sensor-bucket".to_string();
     let repository = Repository::new(Arc::clone(&client), bucket.clone());

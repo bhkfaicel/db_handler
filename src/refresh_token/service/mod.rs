@@ -34,6 +34,47 @@ fn map_common_error(e: CommonError) -> RefreshTokenError {
     }
 }
 
+/// Largest presented session token accepted, in bytes.
+///
+/// Sessions are opaque caller-generated values (256-bit CSPRNG output is
+/// 43 base64url characters; even large signed structures stay far below
+/// this ceiling), so anything beyond it is either abuse or a bug and is
+/// rejected BEFORE any SQL runs. Deliberately generous: it bounds the
+/// value hashed per call, not the format (the library never parses
+/// session tokens).
+const MAX_SESSION_TOKEN_BYTES: usize = 4096;
+
+/// Rejects empty or oversized presented session values BEFORE SQL.
+///
+/// An empty value would otherwise store/look up the digest of the empty
+/// string, and an oversized value would let callers burn arbitrary hashing
+/// work; both are caller bugs, rejected with the typed operation error
+/// before the repository is reached. Raw values are never echoed back in
+/// the error (fixed message only).
+fn validate_presented_session_token(token: &str) -> Result<()> {
+    if token.is_empty() || token.len() > MAX_SESSION_TOKEN_BYTES {
+        return Err(RefreshTokenError::operation(format!(
+            "session token must be non-empty and at most {MAX_SESSION_TOKEN_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects an inverted session validity window BEFORE SQL.
+///
+/// A session whose expiry is not strictly after its creation would be born
+/// already expired (the validation predicate requires `expire_at > now`);
+/// refusing the window at insert time keeps the failure at the store call
+/// instead of a silently useless row.
+fn validate_session_window(expire_at: DateTime<Utc>, created_at: DateTime<Utc>) -> Result<()> {
+    if expire_at <= created_at {
+        return Err(RefreshTokenError::operation(
+            "session expire_at must be strictly after created_at",
+        ));
+    }
+    Ok(())
+}
+
 pub struct RefreshTokenService {
     pub(crate) repository: Arc<RefreshTokenRepository>,
 }
@@ -302,6 +343,235 @@ impl RefreshTokenService {
         };
         self.repository
             .rotate(user_id, old_token, &new_refresh_token, Utc::now())
+            .await
+            .map_err(map_common_error)
+    }
+
+    /// Stores a gRPC session for `(user_id, raw_token, expire_at,
+    /// created_at)`.
+    ///
+    /// Sessions live in the same `refresh_tokens` table as REST refresh
+    /// tokens but are cryptographically domain-separated at the storage
+    /// boundary: a session is stored under the tagged digest
+    /// `grpc-session:<sha256(raw)>` while refresh tokens stay bare 64-hex
+    /// digests, so the same raw value can exist in both domains as two
+    /// distinct rows and no refresh path can consume, purge or revoke a
+    /// session (nor the reverse). No migration was needed: the tagged value
+    /// fits the existing `TEXT NOT NULL UNIQUE` column.
+    ///
+    /// # Token entropy contract
+    ///
+    /// `token` MUST carry at least 256 bits of cryptographic
+    /// unpredictability from the caller's CSPRNG (the library never
+    /// generates tokens). Only the tagged SHA-256 digest is stored at
+    /// rest, so that unpredictability is the sole protection against
+    /// digest guessing or precomputation. The presented value is
+    /// validated BEFORE SQL: empty or oversized values (over 4096 bytes)
+    /// are rejected, as is a window where `expire_at` is not strictly
+    /// after `created_at`.
+    ///
+    /// # Errors
+    ///
+    /// * `RefreshTokenError::AlreadyExists` - the same raw token is
+    ///   already stored as a session for any user: the prior row is kept
+    ///   untouched (no overwrite, no expiry extension).
+    /// * `RefreshTokenError::Common(CommonError::Operation(_))` - empty
+    ///   or oversized token, or `expire_at <= created_at`.
+    /// * `RefreshTokenError::Common(CommonError::Database(_))` - database
+    ///   failure (including an unknown `user_id`, via the foreign key).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::refresh_token::service::RefreshTokenService;
+    /// use db_handler::users::service::UserService;
+    /// use db_handler::db::connection::Connection;
+    /// use chrono::{Duration, Utc};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = RefreshTokenService::new(connection.clone());
+    /// let user_service = UserService::new(connection);
+    /// let user_id = user_service.add("username".to_string(), "email@example.com".to_string(), "password".to_string()).await?;
+    /// // The caller generates the opaque value (>= 256 bits of entropy).
+    /// service.add_session(user_id, "opaque-session-value", Utc::now() + Duration::hours(12), Utc::now()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn add_session(
+        &self,
+        user_id: u32,
+        token: &str,
+        expire_at: DateTime<Utc>,
+        created_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_presented_session_token(token)?;
+        validate_session_window(expire_at, created_at)?;
+        self.repository
+            .insert_session(user_id, token, expire_at, created_at)
+            .await
+            .map_err(map_common_error)
+    }
+
+    /// Non-consumingly validates a presented session token and returns
+    /// the owning user ID.
+    ///
+    /// The whole decision lives in one SQL predicate: the row must match
+    /// the tagged digest of the presented value AND be unrevoked AND be
+    /// strictly unexpired. Validation never mutates the row, so it can
+    /// repeat until revocation or expiry — this is what makes it suitable
+    /// for per-request authentication, unlike the consuming REST rotation.
+    /// Unknown, expired and revoked sessions all return `Ok(None)`
+    /// (fail closed) and are indistinguishable.
+    ///
+    /// # Errors
+    ///
+    /// * `RefreshTokenError::Common(CommonError::Operation(_))` - empty
+    ///   or oversized presented value.
+    /// * `RefreshTokenError::Common(CommonError::Database(_))` - database
+    ///   failure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::refresh_token::service::RefreshTokenService;
+    /// use db_handler::users::service::UserService;
+    /// use db_handler::db::connection::Connection;
+    /// use chrono::{Duration, Utc};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = RefreshTokenService::new(connection.clone());
+    /// let user_service = UserService::new(connection);
+    /// let user_id = user_service.add("username".to_string(), "email@example.com".to_string(), "password".to_string()).await?;
+    /// service.add_session(user_id, "opaque-session-value", Utc::now() + Duration::hours(12), Utc::now()).await?;
+    /// // Non-consuming: repeatable until revocation or expiry.
+    /// assert_eq!(service.validate_session("opaque-session-value").await?, Some(user_id));
+    /// assert_eq!(service.validate_session("opaque-session-value").await?, Some(user_id));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn validate_session(&self, token: &str) -> Result<Option<u32>> {
+        validate_presented_session_token(token)?;
+        self.repository
+            .session_user_id(token, Utc::now())
+            .await
+            .map_err(map_common_error)
+    }
+
+    /// Revokes the presented session in one atomic SQL statement.
+    ///
+    /// Idempotent by design: an unknown, already-revoked or expired value
+    /// matches zero rows and still succeeds, so logout never errors on a
+    /// stale token. Only session-domain rows are reachable; REST refresh
+    /// tokens of the same user are untouched. The raw presented value is
+    /// hashed before it reaches SQL and never stored or returned.
+    ///
+    /// # Errors
+    ///
+    /// * `RefreshTokenError::Common(CommonError::Operation(_))` - empty
+    ///   or oversized presented value.
+    /// * `RefreshTokenError::Common(CommonError::Database(_))` - database
+    ///   failure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::refresh_token::service::RefreshTokenService;
+    /// use db_handler::users::service::UserService;
+    /// use db_handler::db::connection::Connection;
+    /// use chrono::{Duration, Utc};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = RefreshTokenService::new(connection.clone());
+    /// let user_service = UserService::new(connection);
+    /// let user_id = user_service.add("username".to_string(), "email@example.com".to_string(), "password".to_string()).await?;
+    /// service.add_session(user_id, "opaque-session-value", Utc::now() + Duration::hours(12), Utc::now()).await?;
+    /// service.revoke_session("opaque-session-value").await?;
+    /// // Revoked: validation fails closed.
+    /// assert_eq!(service.validate_session("opaque-session-value").await?, None);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn revoke_session(&self, token: &str) -> Result<()> {
+        validate_presented_session_token(token)?;
+        self.repository
+            .revoke_session(token)
+            .await
+            .map_err(map_common_error)
+    }
+
+    /// Revokes every session of one user in one atomic SQL statement
+    /// (logout-everywhere).
+    ///
+    /// Only session-domain rows of `user_id` flip to revoked; REST refresh
+    /// tokens of the same user stay untouched, so a gRPC logout-all never
+    /// breaks an in-flight REST refresh rotation.
+    ///
+    /// # Errors
+    ///
+    /// * `RefreshTokenError::Common(CommonError::Database(_))` - database
+    ///   failure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::refresh_token::service::RefreshTokenService;
+    /// use db_handler::users::service::UserService;
+    /// use db_handler::db::connection::Connection;
+    /// use chrono::{Duration, Utc};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = RefreshTokenService::new(connection.clone());
+    /// let user_service = UserService::new(connection);
+    /// let user_id = user_service.add("username".to_string(), "email@example.com".to_string(), "password".to_string()).await?;
+    /// service.add_session(user_id, "first", Utc::now() + Duration::hours(12), Utc::now()).await?;
+    /// service.add_session(user_id, "second", Utc::now() + Duration::hours(12), Utc::now()).await?;
+    /// service.revoke_all_sessions(user_id).await?;
+    /// assert_eq!(service.validate_session("first").await?, None);
+    /// assert_eq!(service.validate_session("second").await?, None);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn revoke_all_sessions(&self, user_id: u32) -> Result<()> {
+        self.repository
+            .revoke_all_sessions(user_id)
+            .await
+            .map_err(map_common_error)
+    }
+
+    /// Deletes every expired session row across all users.
+    ///
+    /// Caller-dependent sweep (the library schedules no background work):
+    /// a session past its expiry can never validate again, so its row is
+    /// removed outright while every unexpired row — session AND refresh —
+    /// survives. The refresh-domain counterpart is
+    /// [`RefreshTokenService::cleanup_expired`]; each sweep stays inside
+    /// its own token domain.
+    ///
+    /// # Errors
+    ///
+    /// * `RefreshTokenError::Common(CommonError::Database(_))` - database
+    ///   failure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use db_handler::prelude::*;
+    /// use db_handler::refresh_token::service::RefreshTokenService;
+    /// use db_handler::db::connection::Connection;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let connection = Connection::new().await?;
+    /// let service = RefreshTokenService::new(connection);
+    /// service.cleanup_expired_sessions().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn cleanup_expired_sessions(&self) -> Result<()> {
+        self.repository
+            .delete_expired_sessions(Utc::now())
             .await
             .map_err(map_common_error)
     }

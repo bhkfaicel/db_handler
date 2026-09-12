@@ -1,3 +1,21 @@
+//! Home IoT backend persistence library: primary database (SQLite),
+//! time-series history (InfluxDB 2.x) and domain services.
+//!
+//! # Feature gates
+//!
+//! The default build compiles only the core modules (`common`, `db`,
+//! `drives`). Domain modules are opt-in through cargo features:
+//!
+//! - `sensors`: sensor models/services plus the `history`, `keys` and
+//!   `nonces` domains (one dependency closure).
+//! - `users`: the `users` domain (Argon2id password login) together with
+//!   the `refresh_token` domain, which carries both the REST refresh-token
+//!   rotation and the gRPC session validation/revocation API. The two
+//!   modules are gated as one feature because they form one closure.
+//! - `utoipaDoc`: adds OpenAPI schema derives (`utoipa` dependency).
+//!
+//! Dependents must keep requesting the features for every module they use.
+
 // Core layer: always compiled (config helpers, primary/history DB plumbing,
 // driver traits). It has no dependency on any feature-gated domain.
 pub mod common;
