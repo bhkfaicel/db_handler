@@ -3,17 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The test suite links against system SQLite (sqlx), so the dev headers must
-# be present. CI containers may ship without them; install on the fly when
-# possible instead of failing with a confusing compiler error.
-if ! pkg-config --exists sqlite3 2>/dev/null; then
-  if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
-    apt-get update
-    apt-get install -y --no-install-recommends libsqlite3-dev
-  elif ! [ -e /usr/include/sqlite3.h ]; then
-    echo "error: SQLite dev files not found and cannot install libsqlite3-dev (need root + apt-get)" >&2
-    exit 1
-  fi
+# SQLx's "sqlite" feature compiles SQLite from its bundled sources, so the
+# only real build-time requirement here is a C compiler (the same one the
+# TLS/crypto build dependencies already need). Fail early with a clear
+# message instead of a confusing linker error deep inside cargo.
+if ! command -v cc >/dev/null 2>&1; then
+  echo "error: no C compiler (cc) found; the bundled SQLite build requires one" >&2
+  exit 1
 fi
 
 export CONFIG_FILE="${CONFIG_FILE:-config.test.json}"

@@ -78,6 +78,13 @@ and this project adheres to semantic versioning.
   dependency graph, along with the transitive `blowfish` and `base64` entries
   nothing else retained.
 
+### Fixed
+
+- The `scripts/test.sh` CI gate no longer requires system SQLite development
+  headers: SQLx's `sqlite` feature compiles its bundled SQLite and needs only
+  a C compiler, so the preflight now checks for `cc` instead of failing in
+  containers without `libsqlite3-dev`.
+
 ### Changed
 
 - History writes now use a direct `reqwest 0.13` HTTP/1.1 Rustls transport
