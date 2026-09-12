@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to semantic versioning.
 
-## [0.4.0]
+## [Unreleased]
+
+## [0.4.1] 2026-09-12
+
+### Fixed
+
+- The `scripts/test.sh` CI gate no longer requires system SQLite development
+  headers: SQLx's `sqlite` feature compiles its bundled SQLite and needs only
+  a C compiler, so the preflight now checks for `cc` instead of failing in
+  containers without `libsqlite3-dev`.
+
+## [0.4.0] 2026-09-12
 
 ### Added
 
