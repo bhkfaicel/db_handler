@@ -1,6 +1,6 @@
 [package]
 name = "db_handler"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Home IoT backend library: SQLite primary DB, InfluxDB history, sensors, users, keys"
 repository = "https://code.bhk-itsolutions.com/homeiot/db_handler.git"
