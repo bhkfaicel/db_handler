@@ -7,6 +7,13 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- `SensorService::get_by_id_raw(id)` returns the plain `Sensor` row for an
+  id (including its `sensor_type` column), the by-ID counterpart of the
+  existing `get_by_mac_raw`, for callers that do not need the typed
+  `TypedSensor` wrapper.
+
 ## [0.4.2] 2026-09-14
 
 - Update packages
