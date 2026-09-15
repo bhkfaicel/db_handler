@@ -203,6 +203,26 @@ impl SensorService {
         Ok(self.repository.get_by_mac(mac).await?)
     }
 
+    /// Gets a sensor by its ID, returning the raw sensor.
+    ///
+    /// This is the by-ID counterpart of `get_by_mac_raw`: unlike `get_by_id`,
+    /// which wraps the row in the typed `TypedSensor` enum, it returns the
+    /// plain `Sensor` row (including its `sensor_type` column) for callers
+    /// that only need the raw data.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ID of the sensor to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Sensor))` - The sensor if found.
+    /// * `Ok(None)` - If no sensor with the given ID exists.
+    /// * `Err(SensorError)` - If an error occurs during retrieval.
+    pub async fn get_by_id_raw(&self, id: u32) -> Result<Option<Sensor>> {
+        Ok(self.repository.get_by_id(id).await?)
+    }
+
     /// Deletes a sensor by its ID.
     ///
     /// # Arguments
