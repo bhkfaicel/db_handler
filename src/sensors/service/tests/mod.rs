@@ -11,6 +11,8 @@ mod delete_by_mac;
 #[cfg(test)]
 mod find_by_string;
 #[cfg(test)]
+mod get_by_id_raw;
+#[cfg(test)]
 mod get_by_mac;
 #[cfg(test)]
 mod list_by_status;
