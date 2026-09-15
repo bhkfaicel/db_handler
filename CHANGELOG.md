@@ -7,6 +7,8 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+## [0.4.3] 2026-09-15
+
 ### Added
 
 - `SensorService::get_by_id_raw(id)` returns the plain `Sensor` row for an
