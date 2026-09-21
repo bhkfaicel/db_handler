@@ -64,6 +64,7 @@ impl BatteryRepository {
     pub(crate) async fn record(&self, reading: &BatteryReading) -> Result<()> {
         let line = history_line(reading)?;
         self.upsert_latest(reading).await?;
+        // ponytail: history write awaited inline; caller latency couples to the InfluxDB round-trip (bounded by the 30 s request timeout). Detach or batch writes if battery reporting frequency grows.
         self.history
             .write(&self.bucket, line)
             .await

@@ -38,6 +38,10 @@ and this project adheres to semantic versioning.
   as the contact repository's private renderer does.
 - Stop setting `Content-Length` manually on history writes: the HTTP
   client derives the header from the fixed-size request body itself.
+- Document the battery `record` path's kept simplification inline: the
+  history write is awaited, so caller latency couples to the InfluxDB
+  round-trip (bounded by the 30 s request timeout); detach or batch the
+  writes if battery reporting frequency grows.
 
 ## [0.4.3] 2026-09-15
 
