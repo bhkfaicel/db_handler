@@ -7,6 +7,14 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-21
+
+- Add `sensors::battery::{BatteryReading, BatteryService}` with `record` and
+  `latest`, plus an additive `sensor_battery` SQLite migration.
+- Commit last rest/load voltages before writing timestamped InfluxDB battery
+  history; reject orphan rows and prevent older receptions rolling back latest values.
+- Cover migration, upsert, cascading deletion and failed historical writes.
+
 ## [0.4.3] 2026-09-15
 
 ### Added
