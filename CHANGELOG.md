@@ -46,6 +46,10 @@ and this project adheres to semantic versioning.
   exclusively instead of following pre-existing paths: a stale file from
   a crashed prior run is removed first, and the exclusive creation never
   follows a planted symlink (a concurrent collision just fails the test).
+- Document the configuration file's at-rest handling: it carries the
+  InfluxDB token in plaintext, so restrict it to the service user
+  (e.g. `chmod 600`, owner-only) exactly as the SQLite database file
+  guidance prescribes.
 
 ## [0.4.3] 2026-09-15
 
