@@ -18,6 +18,11 @@ and this project adheres to semantic versioning.
   (`BatteryError`: `Common`, `HistoryWrite`, `InvalidTimestamp`) instead of
   `anyhow`, routing SQLite failures through the crate's single sqlx-to-common
   error conversion point.
+- Move `sensors::battery` to the crate's standard domain layout (`model`,
+  `repository`, `error`): a crate-internal `BatteryRepository` now fronts
+  both stores and `BatteryService` implements the `Service` trait, so
+  constructing it requires the trait in scope. All public items stay
+  re-exported from `sensors::battery`.
 
 ## [0.4.3] 2026-09-15
 
