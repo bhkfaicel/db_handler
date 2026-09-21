@@ -26,6 +26,12 @@ and this project adheres to semantic versioning.
 - Share the battery tests' ephemeral HTTP fake through a private
   `tests::support` helper that reads the request up to the body, replies
   with a configurable status and returns the received body.
+- Prove the battery production wiring end to end: one test builds the
+  service through the real `Connection::new()` constructor and the
+  `Service` trait on a migration-runner-created database, creates the
+  parent sensor via `SensorService`, and asserts a deterministic local
+  HTTP 500 history endpoint surfaces as `BatteryError::HistoryWrite`
+  while the SQLite latest value stays readable.
 
 ## [0.4.3] 2026-09-15
 
