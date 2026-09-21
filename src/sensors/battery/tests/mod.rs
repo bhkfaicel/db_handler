@@ -1,6 +1,7 @@
 use super::*;
 use crate::sensors::service::SensorService;
 use chrono::DateTime;
+use std::io::Write;
 use std::time::Duration;
 
 mod support;
@@ -128,13 +129,28 @@ async fn battery_production_wiring_record_history_write_failure_keeps_latest() {
         "dbh_battery_wiring_cfg_{}.json",
         std::process::id()
     ));
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"{{"primary_db_url":":memory:","history_db_url":"http://{addr}","history_db_org":"t","history_db_token":"t"}}"#
-        ),
-    )
-    .unwrap();
+    // Pre-clean a stale file left by a crashed prior run, then create the
+    // file exclusively: exclusive creation (`O_CREAT|O_EXCL`) never follows
+    // a pre-planted symlink, so nothing pre-existing at that path can be
+    // clobbered — a concurrent name collision just fails this open
+    // (`AlreadyExists`) and errors the test.
+    // ponytail: residual is a collision-induced flake, never a clobber;
+    // move to a private temp dir only if the test ever carries real secrets
+    // or guaranteed run-to-completion becomes a requirement.
+    let _ = std::fs::remove_file(&config_path);
+    let mut config_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&config_path)
+        .unwrap();
+    config_file
+        .write_all(
+            format!(
+                r#"{{"primary_db_url":":memory:","history_db_url":"http://{addr}","history_db_org":"t","history_db_token":"t"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
     // `CONFIG_FILE` is process-global: the shared guard serializes the
     // mutation across tests and restores the previous value on drop.
     let guard = crate::test_env::ConfigFileGuard::acquire();

@@ -42,6 +42,10 @@ and this project adheres to semantic versioning.
   history write is awaited, so caller latency couples to the InfluxDB
   round-trip (bounded by the 30 s request timeout); detach or batch the
   writes if battery reporting frequency grows.
+- Make the battery wiring test create its temporary configuration file
+  exclusively instead of following pre-existing paths: a stale file from
+  a crashed prior run is removed first, and the exclusive creation never
+  follows a planted symlink (a concurrent collision just fails the test).
 
 ## [0.4.3] 2026-09-15
 
