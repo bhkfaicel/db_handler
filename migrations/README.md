@@ -15,6 +15,7 @@ the runner.
 | `20260120_add_unique_to_open_close_sensors.sql` | Unique indexes on `sensor_mac` and `sensor_id` |
 | `20260906000001_drop_duplicate_refresh_token_index.sql` | Drops the duplicate manual index on `refresh_tokens.token` (the `UNIQUE` column constraint already indexes it) |
 | `20260906000002_rebuild_nonces_drop_composite_unique.sql` | Rebuilds `nonces` to drop the redundant composite `UNIQUE (value, mac)` |
+| `20260921000000_sensor_battery.sql` | `sensor_battery`: latest rest/load voltages per sensor, cascade on `sensors(id)`, u16 voltage CHECKs |
 
 ## Cascade on sensor deletion
 

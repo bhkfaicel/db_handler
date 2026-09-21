@@ -32,6 +32,10 @@ and this project adheres to semantic versioning.
   parent sensor via `SensorService`, and asserts a deterministic local
   HTTP 500 history endpoint surfaces as `BatteryError::HistoryWrite`
   while the SQLite latest value stays readable.
+- List the battery migration in the migrations README and document the
+  battery line-protocol formatter's integer-only invariant: any future
+  string tag or field must be escaped per InfluxDB line-protocol rules,
+  as the contact repository's private renderer does.
 
 ## [0.4.3] 2026-09-15
 

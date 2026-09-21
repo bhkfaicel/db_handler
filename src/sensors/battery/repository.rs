@@ -97,6 +97,12 @@ impl BatteryRepository {
 }
 
 // Renders the InfluxDB line-protocol body for a battery reading.
+//
+// Invariant: every interpolated input is integer-only (`sensor_id`, the two
+// u16 voltages, the nanosecond timestamp), so no InfluxDB line-protocol
+// escaping is needed today. Any future string tag or field MUST be escaped
+// per InfluxDB line-protocol rules, as the contact repository's private
+// line renderer implements.
 fn history_line(reading: &BatteryReading) -> Result<String> {
     let timestamp = reading.received_at.timestamp_nanos_opt().ok_or_else(|| {
         BatteryError::invalid_timestamp(format!(
