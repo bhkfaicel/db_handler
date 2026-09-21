@@ -14,6 +14,10 @@ and this project adheres to semantic versioning.
 - Commit last rest/load voltages before writing timestamped InfluxDB battery
   history; reject orphan rows and prevent older receptions rolling back latest values.
 - Cover migration, upsert, cascading deletion and failed historical writes.
+- Type `BatteryService::latest` and `record` errors as `sensors::battery::Result`
+  (`BatteryError`: `Common`, `HistoryWrite`, `InvalidTimestamp`) instead of
+  `anyhow`, routing SQLite failures through the crate's single sqlx-to-common
+  error conversion point.
 
 ## [0.4.3] 2026-09-15
 
