@@ -48,7 +48,6 @@ impl HistoryDbClient {
             .post(endpoint)
             .bearer_auth(&self.token)
             .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .header(reqwest::header::CONTENT_LENGTH, body.len())
             .body(body)
             .send()
             .await?

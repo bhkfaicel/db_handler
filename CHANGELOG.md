@@ -36,6 +36,8 @@ and this project adheres to semantic versioning.
   battery line-protocol formatter's integer-only invariant: any future
   string tag or field must be escaped per InfluxDB line-protocol rules,
   as the contact repository's private renderer does.
+- Stop setting `Content-Length` manually on history writes: the HTTP
+  client derives the header from the fixed-size request body itself.
 
 ## [0.4.3] 2026-09-15
 
