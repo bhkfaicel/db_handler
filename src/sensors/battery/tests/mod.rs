@@ -1,9 +1,8 @@
 use super::*;
 use chrono::DateTime;
-use std::{
-    io::{BufRead, BufReader, Read, Write},
-    time::Duration,
-};
+use std::time::Duration;
+
+mod support;
 
 async fn setup(
     status: u16,
@@ -38,34 +37,7 @@ async fn setup(
     .execute(&pool)
     .await
     .unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut reader = BufReader::new(socket);
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                length = value.trim().parse().unwrap();
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        write!(
-            reader.get_mut(),
-            "HTTP/1.1 {status} Result\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        String::from_utf8(body).unwrap()
-    });
+    let (addr, server) = support::history_fake(status);
     let pool = Arc::new(pool);
     let service = BatteryService::with_parts(
         pool.clone(),

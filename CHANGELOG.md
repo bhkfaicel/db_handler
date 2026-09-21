@@ -23,6 +23,9 @@ and this project adheres to semantic versioning.
   both stores and `BatteryService` implements the `Service` trait, so
   constructing it requires the trait in scope. All public items stay
   re-exported from `sensors::battery`.
+- Share the battery tests' ephemeral HTTP fake through a private
+  `tests::support` helper that reads the request up to the body, replies
+  with a configurable status and returns the received body.
 
 ## [0.4.3] 2026-09-15
 
