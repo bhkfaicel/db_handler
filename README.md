@@ -90,6 +90,7 @@ The application reads configuration from a JSON file. Set the path via the `CONF
 Do not commit real credentials. Use `config.example.json` as a template and keep `config.json` or `config.local.json` local (they are in `.gitignore`).
 
 **At-rest protection of the SQLite database is the deployer's responsibility**: the primary database file is plain SQLite (no encryption backend is bundled). Restrict file permissions (e.g. user-only access to the data directory) and/or rely on system-level encryption (LUKS, FileVault, BitLocker) as appropriate for your deployment.
+The configuration file carries the InfluxDB token in plaintext, so restrict it to the service user as well (e.g. `chmod 600 config.json`, owner-only), exactly as prescribed for the database file.
 
 ## Running tests
 

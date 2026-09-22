@@ -7,6 +7,50 @@ and this project adheres to semantic versioning.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-21
+
+- Add `sensors::battery::{BatteryReading, BatteryService}` with `record` and
+  `latest`, plus an additive `sensor_battery` SQLite migration.
+- Commit last rest/load voltages before writing timestamped InfluxDB battery
+  history; reject orphan rows and prevent older receptions rolling back latest values.
+- Cover migration, upsert, cascading deletion and failed historical writes.
+- Type `BatteryService::latest` and `record` errors as `sensors::battery::Result`
+  (`BatteryError`: `Common`, `HistoryWrite`, `InvalidTimestamp`) instead of
+  `anyhow`, routing SQLite failures through the crate's single sqlx-to-common
+  error conversion point.
+- Move `sensors::battery` to the crate's standard domain layout (`model`,
+  `repository`, `error`): a crate-internal `BatteryRepository` now fronts
+  both stores and `BatteryService` implements the `Service` trait, so
+  constructing it requires the trait in scope. All public items stay
+  re-exported from `sensors::battery`.
+- Share the battery tests' ephemeral HTTP fake through a private
+  `tests::support` helper that reads the request up to the body, replies
+  with a configurable status and returns the received body.
+- Prove the battery production wiring end to end: one test builds the
+  service through the real `Connection::new()` constructor and the
+  `Service` trait on a migration-runner-created database, creates the
+  parent sensor via `SensorService`, and asserts a deterministic local
+  HTTP 500 history endpoint surfaces as `BatteryError::HistoryWrite`
+  while the SQLite latest value stays readable.
+- List the battery migration in the migrations README and document the
+  battery line-protocol formatter's integer-only invariant: any future
+  string tag or field must be escaped per InfluxDB line-protocol rules,
+  as the contact repository's private renderer does.
+- Stop setting `Content-Length` manually on history writes: the HTTP
+  client derives the header from the fixed-size request body itself.
+- Document the battery `record` path's kept simplification inline: the
+  history write is awaited, so caller latency couples to the InfluxDB
+  round-trip (bounded by the 30 s request timeout); detach or batch the
+  writes if battery reporting frequency grows.
+- Make the battery wiring test create its temporary configuration file
+  exclusively instead of following pre-existing paths: a stale file from
+  a crashed prior run is removed first, and the exclusive creation never
+  follows a planted symlink (a concurrent collision just fails the test).
+- Document the configuration file's at-rest handling: it carries the
+  InfluxDB token in plaintext, so restrict it to the service user
+  (e.g. `chmod 600`, owner-only) exactly as the SQLite database file
+  guidance prescribes.
+
 ## [0.4.3] 2026-09-15
 
 ### Added
